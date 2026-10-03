@@ -54,8 +54,7 @@ def format_status(snapshot: SystemSnapshot) -> str:
                 bank = token.bank or "unspecified"
                 slots = ",".join(map(str, token.keyslots)) or "none"
                 lines.append(f"    token {token.token_id}: keyslot={slots} bank={bank} pcrs={pcrs}")
-    return "
-".join(lines)
+    return "\n".join(lines)
 
 
 def format_enrollment_plan(plan: EnrollmentPlan) -> str:
@@ -91,8 +90,7 @@ def format_enrollment_plan(plan: EnrollmentPlan) -> str:
             "No existing keyslot or token will be removed in Phase 2.",
         ]
     )
-    return "
-".join(lines)
+    return "\n".join(lines)
 
 
 def snapshot_to_dict(snapshot: SystemSnapshot) -> dict[str, Any]:
