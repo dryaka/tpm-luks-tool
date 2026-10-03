@@ -20,7 +20,7 @@ def format_status(snapshot: SystemSnapshot) -> str:
         f"Secure Boot: {secure_boot}",
         f"State:       {snapshot.drift_state.value}",
         "",
-        "PCR  APPROVED         CURRENT          STATUS",
+        "PCR  APPROVED         STATUS   CURRENT",
     ]
     for item in snapshot.pcr_comparisons:
         if item.matches is True:
@@ -29,7 +29,7 @@ def format_status(snapshot: SystemSnapshot) -> str:
             status = "CHANGED"
         else:
             status = "-"
-        lines.append(f"{item.pcr:<4} {_short(item.approved):<16} {_short(item.current):<16} {status}")
+        lines.append(f"{item.pcr:<4} {_short(item.approved):<16} {status:<8} {item.current}")
 
     for volume in snapshot.volumes:
         lines.extend(["", f"Volume: {volume.name}", f"  UUID: {volume.uuid}", f"  Device: {volume.device}"])
