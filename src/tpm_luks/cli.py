@@ -20,6 +20,62 @@ EXIT_DRIFT = 2
 EXIT_UNINITIALIZED = 3
 EXIT_POLICY_CHANGE = 4
 
+_COMMANDS = {"status", "check", "history", "show"}
+_VALUE_OPTIONS = {"--config", "--state-dir"}
+_HELP_OPTIONS = {"-h", "--help"}
+
+
+def _active_option_positions(argv: list[str], options: set[str]) -> set[int]:
+    """Return option positions, excluding tokens consumed as option values."""
+    positions: set[int] = set()
+    consume_next = False
+    for index, token in enumerate(argv):
+        if consume_next:
+            consume_next = False
+            continue
+        if token in _VALUE_OPTIONS:
+            consume_next = True
+            continue
+        if any(token.startswith(f"{option}=") for option in _VALUE_OPTIONS):
+            continue
+        if token in options:
+            positions.add(index)
+    return positions
+
+
+def _command_position(argv: list[str]) -> int | None:
+    consume_next = False
+    for index, token in enumerate(argv):
+        if consume_next:
+            consume_next = False
+            continue
+        if token in _VALUE_OPTIONS:
+            consume_next = True
+            continue
+        if any(token.startswith(f"{option}=") for option in _VALUE_OPTIONS):
+            continue
+        if token in _COMMANDS:
+            return index
+    return None
+
+
+def _normalize_help_position(argv: list[str]) -> list[str]:
+    """Make help target a named subcommand regardless of option position."""
+    command_position = _command_position(argv)
+    if command_position is None:
+        return argv
+
+    help_positions = _active_option_positions(argv, _HELP_OPTIONS)
+    if not help_positions or all(position > command_position for position in help_positions):
+        return argv
+
+    help_option = argv[min(help_positions)]
+    normalized = [token for index, token in enumerate(argv) if index not in help_positions]
+    command_position = _command_position(normalized)
+    assert command_position is not None
+    normalized.insert(command_position + 1, help_option)
+    return normalized
+
 
 def _add_config_option(parser: argparse.ArgumentParser, *, suppress_default: bool = False) -> None:
     parser.add_argument(
@@ -43,7 +99,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="tpm-luks",
         description="Inspect TPM2 PCR policy state and TPM-bound LUKS2 metadata.",
-        epilog="Use 'tpm-luks <command> --help' for command-specific options and examples.",
+        epilog=(
+            "Applicable options may appear before or after the command. If a command is named, "
+            "-h/--help shows help for that command regardless of position."
+        ),
     )
     _add_config_option(parser)
     _add_state_option(parser)
@@ -146,7 +205,8 @@ def _print_history(store: StateStore) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
-    args = parser.parse_args(argv)
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    args = parser.parse_args(_normalize_help_position(raw_argv))
     try:
         if args.command == "history":
             _print_history(StateStore(args.state_dir))
