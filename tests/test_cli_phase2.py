@@ -3,6 +3,7 @@ import io
 import unittest
 from unittest.mock import patch
 
+from tpm_luks.cleanup import CleanupInterrupted
 from tpm_luks.cli import _normalize_command_flags, main
 from tpm_luks.transaction import EnrollmentInterrupted
 
@@ -25,6 +26,27 @@ class Phase2CLITests(unittest.TestCase):
     def test_reenroll_flags_can_precede_command(self):
         normalized = _normalize_command_flags(["--yes", "--force", "reenroll"])
         self.assertEqual(normalized, ["reenroll", "--yes", "--force"])
+
+    def test_cleanup_help_before_command(self):
+        text = self._help(["--help", "cleanup"])
+        self.assertIn("usage: tpm-luks cleanup", text)
+        self.assertIn("--yes", text)
+
+    def test_cleanup_yes_flag_can_precede_command(self):
+        normalized = _normalize_command_flags(["--yes", "cleanup"])
+        self.assertEqual(normalized, ["cleanup", "--yes"])
+
+    def test_interrupted_cleanup_returns_130_without_traceback(self):
+        stderr = io.StringIO()
+        with patch(
+            "tpm_luks.cli._run_cleanup",
+            side_effect=CleanupInterrupted("cleanup interrupted for A"),
+        ):
+            with contextlib.redirect_stderr(stderr):
+                rc = main(["cleanup"])
+        self.assertEqual(rc, 130)
+        self.assertIn("cleanup interrupted for A", stderr.getvalue())
+        self.assertNotIn("Traceback", stderr.getvalue())
 
     def test_interrupted_reenroll_returns_130_without_traceback(self):
         stderr = io.StringIO()

@@ -36,10 +36,19 @@ _AUTO_PUBLIC_KEY_PATHS = (
     Path("/usr/lib/systemd/tpm2-pcr-public-key.pem"),
 )
 _DEFAULT_EVENT_LOG = Path("/sys/kernel/security/tpm0/binary_bios_measurements")
+_BOOT_ID_PATH = Path("/proc/sys/kernel/random/boot_id")
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _read_boot_id(path: Path = _BOOT_ID_PATH) -> str | None:
+    try:
+        value = path.read_text(encoding="ascii").strip()
+    except OSError:
+        return None
+    return value or None
 
 
 def _token_summary(token: TPMToken) -> dict[str, Any]:
@@ -48,6 +57,7 @@ def _token_summary(token: TPMToken) -> dict[str, Any]:
         "keyslots": list(token.keyslots),
         "bank": token.bank,
         "pcrs": list(token.pcrs),
+        "policy_hashes": list(token.policy_hashes),
     }
 
 
@@ -268,6 +278,7 @@ class EnrollmentService:
                 plan.transaction_id,
                 state="PENDING_BOOT_TEST",
                 enrolled_at=approved_at,
+                boot_id_at_enroll=_read_boot_id(),
             )
             self.state_store.write_approved_state(
                 ApprovedState(

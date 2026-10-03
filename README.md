@@ -51,7 +51,19 @@ Phase 2 adds safe enrollment:
 - approved-state update only after every configured volume verifies,
 - final transaction state `PENDING_BOOT_TEST`.
 
-Phase 2 never removes an existing LUKS keyslot or token. Cleanup is Phase 3.
+Phase 2 never removes an existing LUKS keyslot or token.
+
+Phase 3 adds explicit cleanup after a successful boot test:
+
+- verifies the pending transaction, approved PCR state, and current PCR values,
+- detects a reboot by boot ID for transactions created by version 0.3.0 and later,
+- requires operator confirmation that reboot and TPM unlock succeeded,
+- derives the exact target TPM policy hash from the replacement enrollment,
+- refuses cleanup when obsolete enrollment identity cannot be proven,
+- creates fresh pre-cleanup LUKS header backups when header backup is enabled,
+- removes only recorded obsolete TPM keyslot/token pairs,
+- supports retry after an interrupted or failed cleanup,
+- captures post-cleanup LUKS metadata and marks the transaction `COMPLETE`.
 
 The current implementation supports the SHA-256 PCR bank and automatic TPM device selection. PCR selection itself is policy-driven and may contain one or more PCR indices.
 
@@ -97,14 +109,9 @@ Implemented:
 tpm-luks status
 tpm-luks check
 tpm-luks reenroll
+tpm-luks cleanup
 tpm-luks history
 tpm-luks show <transaction-id>
-```
-
-Planned:
-
-```text
-tpm-luks cleanup
 ```
 
 ### Read-only inspection
@@ -140,9 +147,19 @@ The command:
 
 `systemd-cryptenroll` may request an existing LUKS passphrase or recovery key for each volume.
 
-After success, reboot and verify TPM unlock. Do not manually remove the old TPM enrollment until Phase 3 cleanup is implemented or until you deliberately perform a reviewed manual cleanup.
+After success, reboot and verify TPM unlock, then run:
 
-Use `--yes` only when you intentionally want to skip the confirmation. `--force` allows re-enrollment even when the current PCR state already matches the approved state.
+```bash
+sudo .venv/bin/tpm-luks cleanup \
+  --config ./test-policy.toml \
+  --state-dir /var/lib/tpm-luks
+```
+
+`cleanup` shows the exact token/keyslot pairs it proposes to remove. Confirmation attests that the reboot and TPM unlock succeeded. For transactions created by version 0.3.0 and later, the tool additionally refuses cleanup if the Linux boot ID has not changed since enrollment. Older transactions do not contain that evidence and are therefore reported as requiring operator attestation.
+
+Cleanup is resumable after a handled interruption or command failure. A failed cleanup remains an active transaction in `FAILED_CLEANUP`; rerunning `cleanup` reconciles current LUKS metadata with the recorded cleanup targets and continues only when the partial state is safe and explainable.
+
+Use `--yes` only when you intentionally want to skip the interactive confirmation. For `cleanup`, `--yes` is also the operator attestation that the post-enrollment reboot and TPM unlock were successful. `reenroll --force` allows re-enrollment even when the current PCR state already matches the approved state.
 
 ## Runtime data
 
@@ -158,10 +175,13 @@ Default runtime location:
         ├── pcrs-after.json
         ├── tpm-eventlog-before.bin
         ├── volume-<uuid>-before.json
-        └── volume-<uuid>-after-enroll.json
+        ├── volume-<uuid>-after-enroll.json
+        └── volume-<uuid>-after-cleanup.json
 ```
 
 State/history directories are created with mode `0700`; generated files are mode `0600`.
+
+Phase 2 creates a pre-enrollment header backup. Phase 3 creates a separate pre-cleanup header backup before deleting any obsolete keyslot, because the pre-enrollment backup does not contain the replacement TPM enrollment.
 
 LUKS header backups are deliberately stored outside this runtime tree and are sensitive. The concern is not that the live LUKS header is normally secret; rather, an old backup preserves historical keyslot/authentication state. Restoring it can therefore make an authentication method that was later removed or rotated valid again, provided the corresponding secret is still known. Retain and dispose of old backups accordingly.
 

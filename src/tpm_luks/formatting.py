@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from .cleanup import CleanupPlan
 from .models import SystemSnapshot
 from .transaction import EnrollmentPlan
 
@@ -53,7 +54,15 @@ def format_status(snapshot: SystemSnapshot) -> str:
                 pcrs = "+".join(map(str, token.pcrs)) or "none"
                 bank = token.bank or "unspecified"
                 slots = ",".join(map(str, token.keyslots)) or "none"
-                lines.append(f"    token {token.token_id}: keyslot={slots} bank={bank} pcrs={pcrs}")
+                policy_hash = (
+                    ",".join(_short(value) for value in token.policy_hashes)
+                    if token.policy_hashes
+                    else "unknown"
+                )
+                lines.append(
+                    f"    token {token.token_id}: keyslot={slots} bank={bank} "
+                    f"pcrs={pcrs} policy={policy_hash}"
+                )
     return "\n".join(lines)
 
 
@@ -88,6 +97,49 @@ def format_enrollment_plan(plan: EnrollmentPlan) -> str:
             "",
             "The operation only ADDS new TPM enrollments.",
             "No existing keyslot or token will be removed in Phase 2.",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def format_cleanup_plan(plan: CleanupPlan) -> str:
+    lines = [
+        f"Transaction: {plan.transaction_id}",
+        f"State:       {plan.previous_state}",
+        f"Boot check:  {plan.boot_verification}",
+        "Target TPM policy hash:",
+    ]
+    for value in plan.target_policy_hashes:
+        lines.append(f"  {value}")
+
+    if plan.boot_verification == "LEGACY_OPERATOR_ATTESTATION":
+        lines.extend(
+            [
+                "",
+                "WARNING: this transaction predates boot-ID recording.",
+                "Your confirmation is the evidence that reboot and TPM unlock succeeded.",
+            ]
+        )
+
+    lines.extend(["", "Cleanup targets:"])
+    if not plan.targets:
+        lines.append("  none")
+    else:
+        for target in plan.targets:
+            lines.append(
+                f"  {target.volume_name}: token {target.token_id}, keyslot {target.keyslot}"
+            )
+
+    if plan.header_backup_dir:
+        lines.append(f"Pre-cleanup header backups: {plan.header_backup_dir}")
+    else:
+        lines.append("Pre-cleanup header backups: disabled")
+
+    lines.extend(
+        [
+            "",
+            "DESTRUCTIVE: listed keyslots will be wiped before their LUKS2 tokens are removed.",
+            "Tokens carrying the verified target TPM policy are preserved.",
         ]
     )
     return "\n".join(lines)
@@ -135,6 +187,7 @@ def snapshot_to_dict(snapshot: SystemSnapshot) -> dict[str, Any]:
                         "keyslots": list(token.keyslots),
                         "bank": token.bank,
                         "pcrs": list(token.pcrs),
+                        "policy_hashes": list(token.policy_hashes),
                     }
                     for token in volume.tpm_tokens
                 ],

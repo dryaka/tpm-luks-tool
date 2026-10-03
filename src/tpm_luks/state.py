@@ -17,7 +17,7 @@ class StateError(RuntimeError):
 
 _TRANSACTION_ID = re.compile(r"^[A-Za-z0-9._:+-]+$")
 _EVIDENCE_NAME = re.compile(r"^[A-Za-z0-9._-]+$")
-_ACTIVE_STATES = {"PREPARING", "PENDING_BOOT_TEST", "CLEANING"}
+_ACTIVE_STATES = {"PREPARING", "PENDING_BOOT_TEST", "CLEANING", "FAILED_CLEANUP"}
 
 
 class StateStore:
