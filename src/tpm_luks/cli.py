@@ -21,16 +21,97 @@ EXIT_UNINITIALIZED = 3
 EXIT_POLICY_CHANGE = 4
 
 
+def _add_config_option(parser: argparse.ArgumentParser, *, suppress_default: bool = False) -> None:
+    parser.add_argument(
+        "--config",
+        default=argparse.SUPPRESS if suppress_default else "/etc/tpm-luks.toml",
+        metavar="PATH",
+        help="policy TOML file (default: /etc/tpm-luks.toml)",
+    )
+
+
+def _add_state_option(parser: argparse.ArgumentParser, *, suppress_default: bool = False) -> None:
+    parser.add_argument(
+        "--state-dir",
+        default=argparse.SUPPRESS if suppress_default else "/var/lib/tpm-luks",
+        metavar="PATH",
+        help="runtime state/history directory (default: /var/lib/tpm-luks)",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="tpm-luks")
-    parser.add_argument("--config", default="/etc/tpm-luks.toml", help="policy TOML file")
-    parser.add_argument("--state-dir", default="/var/lib/tpm-luks", help="runtime state directory")
-    sub = parser.add_subparsers(dest="command", required=True)
-    sub.add_parser("status", help="show human-readable current state")
-    sub.add_parser("check", help="emit machine-readable current state as JSON")
-    sub.add_parser("history", help="list stored transaction manifests")
-    show = sub.add_parser("show", help="show one stored transaction manifest")
-    show.add_argument("transaction_id")
+    parser = argparse.ArgumentParser(
+        prog="tpm-luks",
+        description="Inspect TPM2 PCR policy state and TPM-bound LUKS2 metadata.",
+        epilog="Use 'tpm-luks <command> --help' for command-specific options and examples.",
+    )
+    _add_config_option(parser)
+    _add_state_option(parser)
+
+    sub = parser.add_subparsers(dest="command", required=True, title="commands")
+
+    status = sub.add_parser(
+        "status",
+        help="show human-readable current state",
+        description=(
+            "Inspect the configured PCR policy, compare current PCR values with the approved "
+            "state, and show LUKS2 keyslots and systemd-tpm2 token associations."
+        ),
+        epilog=(
+            "Example:\n"
+            "  sudo tpm-luks status --config ./test-policy.toml "
+            "--state-dir /tmp/tpm-luks-test-state"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    _add_config_option(status, suppress_default=True)
+    _add_state_option(status, suppress_default=True)
+
+    check = sub.add_parser(
+        "check",
+        help="emit machine-readable current state as JSON",
+        description=(
+            "Perform the same read-only inspection as 'status', but emit JSON suitable for "
+            "monitoring or scripts."
+        ),
+        epilog=(
+            "Exit codes:\n"
+            "  0  current PCR policy matches approved state\n"
+            "  1  configuration, command, metadata, or runtime error\n"
+            "  2  PCR drift detected\n"
+            "  3  no approved state exists\n"
+            "  4  configured policy differs from approved policy\n"
+            "\nExample:\n"
+            "  sudo tpm-luks check --config ./test-policy.toml "
+            "--state-dir /tmp/tpm-luks-test-state"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    _add_config_option(check, suppress_default=True)
+    _add_state_option(check, suppress_default=True)
+
+    history = sub.add_parser(
+        "history",
+        help="list stored transaction manifests",
+        description="List transaction manifests stored under the runtime history directory.",
+        epilog="Example:\n  tpm-luks history --state-dir /var/lib/tpm-luks",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    _add_state_option(history, suppress_default=True)
+
+    show = sub.add_parser(
+        "show",
+        help="show one stored transaction manifest",
+        description="Display one transaction manifest as formatted JSON.",
+        epilog=(
+            "Example:\n"
+            "  tpm-luks show 20261003T180000+0200 --state-dir /var/lib/tpm-luks"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    _add_state_option(show, suppress_default=True)
+    show.add_argument("transaction_id", metavar="TRANSACTION_ID", help="transaction identifier")
+
     return parser
 
 
