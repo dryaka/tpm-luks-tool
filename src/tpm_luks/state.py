@@ -100,8 +100,7 @@ class StateStore:
 
     def write_evidence_json(self, transaction_id: str, name: str, data: Any) -> None:
         path = self._evidence_path(transaction_id, name)
-        self._atomic_write_text(path, json.dumps(data, indent=2, sort_keys=True) + "
-")
+        self._atomic_write_text(path, json.dumps(data, indent=2, sort_keys=True) + "\n")
 
     def write_evidence_bytes(self, transaction_id: str, name: str, data: bytes) -> None:
         path = self._evidence_path(transaction_id, name)
@@ -163,8 +162,7 @@ class StateStore:
             raise StateError(f"cannot prepare state directory {path}: {exc}") from exc
 
     def _write_json(self, path: Path, data: Any) -> None:
-        self._atomic_write_text(path, json.dumps(data, indent=2, sort_keys=True) + "
-")
+        self._atomic_write_text(path, json.dumps(data, indent=2, sort_keys=True) + "\n")
 
     @staticmethod
     def _atomic_write_text(path: Path, text: str) -> None:
