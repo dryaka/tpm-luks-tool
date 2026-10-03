@@ -149,11 +149,11 @@ pcrs = [7]
 
 [[volume]]
 name = "FEDORA-A"
-uuid = "bfee50f5-bf53-46bb-bb4c-9309baf9974f"
+uuid = "9f36aa12-4b29-4e3d-9b1a-2d4ce85f71a0"
 
 [[volume]]
 name = "FEDORA-B"
-uuid = "ea712332-3159-4028-a06c-8b7d4fc3e8dd"
+uuid = "3a80df27-6c14-49b7-a526-1f9de3b4c802"
 
 [luks]
 preserve_non_tpm_slots = true
