@@ -192,7 +192,7 @@ Runtime state is stored separately from policy configuration:
 
 LUKS header backups contain sensitive recovery metadata and must not be treated as ordinary audit files. If header backup is enabled, `audit.header_backup_dir` must be explicitly configured. Phase 2 requires this directory to exist and to be outside the runtime state directory.
 
-For protection against a failed header modification, another independent filesystem on the same machine is sufficient; for example, a separate Btrfs filesystem or mirror is a reasonable transactional backup target. Off-machine or otherwise independent storage is stronger when protection against whole-disk or whole-machine loss is also required.
+For protection against a failed header modification, another independent filesystem on the same machine is sufficient. Off-machine or otherwise independent storage is stronger when protection against whole-disk or whole-machine loss is also required.
 
 The sensitivity of a header backup does not come from the live LUKS header being inherently secret. A backup preserves historical keyslot and authentication state. Restoring an older header can therefore re-enable a keyslot or authentication method that was later removed or rotated, if the corresponding secret is still available. Old header backups must consequently have an explicit retention and disposal policy.
 
