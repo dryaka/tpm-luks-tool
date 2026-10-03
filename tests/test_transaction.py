@@ -14,7 +14,7 @@ from tpm_luks.models import (
 )
 from tpm_luks.runner import CommandError, CommandResult
 from tpm_luks.state import StateStore
-from tpm_luks.transaction import EnrollmentError, EnrollmentService
+from tpm_luks.transaction import EnrollmentError, EnrollmentInterrupted, EnrollmentService
 
 
 PCR = "a" * 64
@@ -134,6 +134,26 @@ class TransactionTests(unittest.TestCase):
             self.assertIn("--tpm2-with-pin=no", enroll_call[0])
             self.assertIsNone(enroll_call[1]["timeout"])
             self.assertFalse(enroll_call[1]["capture_output"])
+
+    def test_enrollment_interrupt_is_durable_and_identifies_volume(self):
+        with tempfile.TemporaryDirectory() as directory:
+            service, runner = self._service(directory)
+            plan = service.prepare()
+            original_run = runner.run
+
+            def interrupt_enrollment(argv, **kwargs):
+                if argv[0] == "systemd-cryptenroll":
+                    raise KeyboardInterrupt
+                return original_run(argv, **kwargs)
+
+            runner.run = interrupt_enrollment
+            with self.assertRaises(EnrollmentInterrupted):
+                service.execute(plan)
+            manifest = StateStore(directory).load_manifest(plan.transaction_id)
+            self.assertEqual(manifest["state"], "FAILED_ENROLLMENT")
+            self.assertEqual(manifest["failed_volume"], "A")
+            self.assertIn("interrupted", manifest["error"])
+            self.assertIsNone(StateStore(directory).load_approved_state())
 
     def test_enrollment_failure_is_durable_and_does_not_update_approved_state(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -1,8 +1,10 @@
 import contextlib
 import io
 import unittest
+from unittest.mock import patch
 
 from tpm_luks.cli import _normalize_command_flags, main
+from tpm_luks.transaction import EnrollmentInterrupted
 
 
 class Phase2CLITests(unittest.TestCase):
@@ -23,6 +25,18 @@ class Phase2CLITests(unittest.TestCase):
     def test_reenroll_flags_can_precede_command(self):
         normalized = _normalize_command_flags(["--yes", "--force", "reenroll"])
         self.assertEqual(normalized, ["reenroll", "--yes", "--force"])
+
+    def test_interrupted_reenroll_returns_130_without_traceback(self):
+        stderr = io.StringIO()
+        with patch(
+            "tpm_luks.cli._run_reenroll",
+            side_effect=EnrollmentInterrupted("TPM enrollment interrupted for A"),
+        ):
+            with contextlib.redirect_stderr(stderr):
+                rc = main(["reenroll"])
+        self.assertEqual(rc, 130)
+        self.assertIn("TPM enrollment interrupted for A", stderr.getvalue())
+        self.assertNotIn("Traceback", stderr.getvalue())
 
 
 if __name__ == "__main__":
