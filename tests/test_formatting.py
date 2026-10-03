@@ -38,7 +38,8 @@ class FormattingTests(unittest.TestCase):
         line = next(line for line in output.splitlines() if line.startswith("7"))
         self.assertTrue(line.endswith(current))
         self.assertIn("CHANGED", line)
-        self.assertIn("CURRENT", output.splitlines()[8])
+        header = next(line for line in output.splitlines() if line.startswith("PCR  "))
+        self.assertTrue(header.endswith("CURRENT"))
 
 
 if __name__ == "__main__":
