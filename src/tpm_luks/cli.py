@@ -136,8 +136,8 @@ def build_parser() -> argparse.ArgumentParser:
             "state, and show LUKS2 keyslots and systemd-tpm2 token associations."
         ),
         epilog=(
-            "Example:
-  sudo tpm-luks status --config ./test-policy.toml "
+            "Example:\n"
+            "  sudo tpm-luks status --config ./test-policy.toml "
             "--state-dir /tmp/tpm-luks-test-state"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -153,21 +153,14 @@ def build_parser() -> argparse.ArgumentParser:
             "monitoring or scripts."
         ),
         epilog=(
-            "Exit codes:
-"
-            "  0  current PCR policy matches approved state
-"
-            "  1  configuration, command, metadata, or runtime error
-"
-            "  2  PCR drift detected
-"
-            "  3  no approved state exists
-"
-            "  4  configured policy differs from approved policy
-"
-            "
-Example:
-  sudo tpm-luks check --config ./test-policy.toml "
+            "Exit codes:\n"
+            "  0  current PCR policy matches approved state\n"
+            "  1  configuration, command, metadata, or runtime error\n"
+            "  2  PCR drift detected\n"
+            "  3  no approved state exists\n"
+            "  4  configured policy differs from approved policy\n"
+            "\nExample:\n"
+            "  sudo tpm-luks check --config ./test-policy.toml "
             "--state-dir /tmp/tpm-luks-test-state"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -185,14 +178,11 @@ Example:
             "removed by this command."
         ),
         epilog=(
-            "The command may prompt for an existing LUKS passphrase/recovery key for each volume.
-"
+            "The command may prompt for an existing LUKS passphrase/recovery key for each volume.\n"
             "Successful enrollment ends in PENDING_BOOT_TEST; obsolete TPM slots remain until the "
-            "Phase 3 cleanup command is run after a successful reboot.
-
-"
-            "Example:
-  sudo tpm-luks reenroll --config /etc/tpm-luks.toml"
+            "Phase 3 cleanup command is run after a successful reboot.\n\n"
+            "Example:\n"
+            "  sudo tpm-luks reenroll --config /etc/tpm-luks.toml"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -209,8 +199,7 @@ Example:
         "history",
         help="list stored transaction manifests",
         description="List transaction manifests stored under the runtime history directory.",
-        epilog="Example:
-  tpm-luks history --state-dir /var/lib/tpm-luks",
+        epilog="Example:\n  tpm-luks history --state-dir /var/lib/tpm-luks",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     _add_state_option(history, suppress_default=True)
@@ -219,8 +208,7 @@ Example:
         "show",
         help="show one stored transaction manifest",
         description="Display one transaction manifest as formatted JSON.",
-        epilog="Example:
-  tpm-luks show 20261003T180000Z --state-dir /var/lib/tpm-luks",
+        epilog="Example:\n  tpm-luks show 20261003T180000Z --state-dir /var/lib/tpm-luks",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     _add_state_option(show, suppress_default=True)
