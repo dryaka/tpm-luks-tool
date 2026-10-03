@@ -13,7 +13,7 @@ from .pcr import PCRReadError, PCRReader
 from .runner import CommandError, Runner
 from .service import collect_snapshot
 from .state import StateError, StateStore
-from .transaction import EnrollmentError, EnrollmentService
+from .transaction import EnrollmentError, EnrollmentInterrupted, EnrollmentService
 
 
 EXIT_OK = 0
@@ -258,7 +258,11 @@ def _run_reenroll(args: argparse.Namespace) -> int:
         if not sys.stdin.isatty():
             service.cancel(plan)
             raise EnrollmentError("interactive confirmation requires a TTY; use --yes to approve explicitly")
-        answer = input("Proceed with additive TPM enrollment? [y/N] ").strip().lower()
+        try:
+            answer = input("Proceed with additive TPM enrollment? [y/N] ").strip().lower()
+        except KeyboardInterrupt as exc:
+            service.cancel(plan)
+            raise EnrollmentInterrupted("interrupted before enrollment; transaction cancelled") from exc
         if answer not in {"y", "yes"}:
             service.cancel(plan)
             print("Cancelled; no LUKS metadata was changed.")
@@ -293,6 +297,12 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "check":
             print(format_check_json(snapshot))
             return _drift_exit_code(snapshot.drift_state)
+    except EnrollmentInterrupted as exc:
+        print(f"\ntpm-luks: {exc}", file=sys.stderr)
+        return 130
+    except KeyboardInterrupt:
+        print("\ntpm-luks: interrupted", file=sys.stderr)
+        return 130
     except (
         PolicyError,
         StateError,

@@ -18,6 +18,10 @@ class EnrollmentError(RuntimeError):
     pass
 
 
+class EnrollmentInterrupted(EnrollmentError):
+    pass
+
+
 @dataclass(frozen=True)
 class EnrollmentPlan:
     transaction_id: str
@@ -148,6 +152,10 @@ class EnrollmentService:
                     )
             if self.policy.audit.event_log:
                 self._capture_event_log(transaction_id)
+        except KeyboardInterrupt as exc:
+            interruption = EnrollmentInterrupted("interrupted during pre-enrollment evidence capture")
+            self._mark_failure(transaction_id, "FAILED_PRECHECK", interruption)
+            raise interruption from exc
         except Exception as exc:
             self._mark_failure(transaction_id, "FAILED_PRECHECK", exc)
             raise EnrollmentError(f"pre-enrollment evidence capture failed: {exc}") from exc
@@ -172,6 +180,10 @@ class EnrollmentService:
         if self.policy.audit.header_backup:
             try:
                 manifest = self._backup_headers(plan, manifest)
+            except KeyboardInterrupt as exc:
+                interruption = EnrollmentInterrupted("interrupted during LUKS header backup")
+                self._mark_failure(plan.transaction_id, "FAILED_PRECHECK", interruption)
+                raise interruption from exc
             except Exception as exc:
                 self._mark_failure(plan.transaction_id, "FAILED_PRECHECK", exc)
                 raise EnrollmentError(f"LUKS header backup failed before enrollment: {exc}") from exc
@@ -185,6 +197,17 @@ class EnrollmentService:
                     timeout=None,
                     capture_output=False,
                 )
+            except KeyboardInterrupt as exc:
+                interruption = EnrollmentInterrupted(
+                    f"TPM enrollment interrupted for {volume_policy.name}"
+                )
+                self._mark_failure(
+                    plan.transaction_id,
+                    "FAILED_ENROLLMENT",
+                    interruption,
+                    failed_volume=volume_policy.name,
+                )
+                raise interruption from exc
             except (CommandError, OSError) as exc:
                 self._mark_failure(
                     plan.transaction_id,
@@ -209,6 +232,17 @@ class EnrollmentService:
                 volume_entry["new_keyslot"] = new_keyslot
                 volume_entry["after_enroll"] = _volume_summary(after)
                 self.state_store.write_manifest(plan.transaction_id, manifest)
+            except KeyboardInterrupt as exc:
+                interruption = EnrollmentInterrupted(
+                    f"post-enrollment verification interrupted for {volume_policy.name}"
+                )
+                self._mark_failure(
+                    plan.transaction_id,
+                    "FAILED_VERIFICATION",
+                    interruption,
+                    failed_volume=volume_policy.name,
+                )
+                raise interruption from exc
             except Exception as exc:
                 self._mark_failure(
                     plan.transaction_id,
@@ -244,6 +278,10 @@ class EnrollmentService:
                 approved_at=approved_at,
             )
             return manifest
+        except KeyboardInterrupt as exc:
+            interruption = EnrollmentInterrupted("interrupted during final enrollment verification")
+            self._mark_failure(plan.transaction_id, "FAILED_VERIFICATION", interruption)
+            raise interruption from exc
         except Exception as exc:
             self._mark_failure(plan.transaction_id, "FAILED_VERIFICATION", exc)
             raise EnrollmentError(f"final enrollment verification failed: {exc}") from exc
@@ -382,7 +420,7 @@ class EnrollmentService:
         self,
         transaction_id: str,
         state: str,
-        exc: Exception,
+        exc: BaseException,
         *,
         failed_volume: str | None = None,
     ) -> None:
