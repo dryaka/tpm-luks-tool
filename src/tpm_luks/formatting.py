@@ -4,6 +4,7 @@ import json
 from typing import Any
 
 from .models import SystemSnapshot
+from .transaction import EnrollmentPlan
 
 
 def _short(value: str | None) -> str:
@@ -12,6 +13,11 @@ def _short(value: str | None) -> str:
 
 def format_status(snapshot: SystemSnapshot) -> str:
     secure_boot = {True: "enabled", False: "disabled", None: "unknown"}[snapshot.secure_boot]
+    pending = (
+        f"{snapshot.pending_transaction_id} ({snapshot.pending_transaction_state})"
+        if snapshot.pending_transaction_id
+        else "none"
+    )
     lines = [
         f"Policy:      {snapshot.policy.policy_name}",
         f"TPM device:  {snapshot.policy.tpm.device}",
@@ -19,6 +25,7 @@ def format_status(snapshot: SystemSnapshot) -> str:
         f"PCRs:        {','.join(map(str, snapshot.policy.tpm.pcrs))}",
         f"Secure Boot: {secure_boot}",
         f"State:       {snapshot.drift_state.value}",
+        f"Pending tx:  {pending}",
         "",
         "PCR  APPROVED         STATUS   CURRENT",
     ]
@@ -34,7 +41,10 @@ def format_status(snapshot: SystemSnapshot) -> str:
     for volume in snapshot.volumes:
         lines.extend(["", f"Volume: {volume.name}", f"  UUID: {volume.uuid}", f"  Device: {volume.device}"])
         lines.append("  Keyslots: " + (", ".join(map(str, volume.keyslots)) or "none"))
-        lines.append("  Non-TPM keyslots: " + (", ".join(map(str, volume.non_tpm_keyslots)) or "none"))
+        lines.append(
+            "  Passphrase/recovery keyslots: "
+            + (", ".join(map(str, volume.recovery_keyslots)) or "none")
+        )
         if not volume.tpm_tokens:
             lines.append("  TPM tokens: none")
         else:
@@ -44,7 +54,45 @@ def format_status(snapshot: SystemSnapshot) -> str:
                 bank = token.bank or "unspecified"
                 slots = ",".join(map(str, token.keyslots)) or "none"
                 lines.append(f"    token {token.token_id}: keyslot={slots} bank={bank} pcrs={pcrs}")
-    return "\n".join(lines)
+    return "
+".join(lines)
+
+
+def format_enrollment_plan(plan: EnrollmentPlan) -> str:
+    snapshot = plan.snapshot
+    lines = [
+        f"Transaction: {plan.transaction_id}",
+        f"Type:        {plan.transaction_type}",
+        f"Policy:      {snapshot.policy.policy_name}",
+        f"PCR policy:  {snapshot.policy.tpm.bank}:{'+'.join(map(str, snapshot.policy.tpm.pcrs))}",
+        "",
+        "PCR  APPROVED         CURRENT",
+    ]
+    for item in snapshot.pcr_comparisons:
+        lines.append(f"{item.pcr:<4} {_short(item.approved):<16} {item.current}")
+
+    lines.append("")
+    lines.append("Volumes:")
+    for volume in snapshot.volumes:
+        recovery = ",".join(map(str, volume.recovery_keyslots)) or "none"
+        tokens = ", ".join(
+            f"token {token.token_id}->keyslot {','.join(map(str, token.keyslots))}"
+            for token in volume.tpm_tokens
+        ) or "none"
+        lines.append(f"  {volume.name}: recovery/passphrase keyslots={recovery}; TPM={tokens}")
+    if plan.header_backup_dir:
+        lines.append(f"Header backups: {plan.header_backup_dir}")
+    else:
+        lines.append("Header backups: disabled")
+    lines.extend(
+        [
+            "",
+            "The operation only ADDS new TPM enrollments.",
+            "No existing keyslot or token will be removed in Phase 2.",
+        ]
+    )
+    return "
+".join(lines)
 
 
 def snapshot_to_dict(snapshot: SystemSnapshot) -> dict[str, Any]:
@@ -52,6 +100,14 @@ def snapshot_to_dict(snapshot: SystemSnapshot) -> dict[str, Any]:
         "policy_name": snapshot.policy.policy_name,
         "drift_state": snapshot.drift_state.value,
         "secure_boot": snapshot.secure_boot,
+        "pending_transaction": (
+            {
+                "id": snapshot.pending_transaction_id,
+                "state": snapshot.pending_transaction_state,
+            }
+            if snapshot.pending_transaction_id
+            else None
+        ),
         "tpm": {
             "device": snapshot.policy.tpm.device,
             "bank": snapshot.policy.tpm.bank,
@@ -73,6 +129,8 @@ def snapshot_to_dict(snapshot: SystemSnapshot) -> dict[str, Any]:
                 "device": volume.device,
                 "keyslots": list(volume.keyslots),
                 "non_tpm_keyslots": list(volume.non_tpm_keyslots),
+                "token_bound_keyslots": list(volume.token_bound_keyslots),
+                "recovery_keyslots": list(volume.recovery_keyslots),
                 "tpm_tokens": [
                     {
                         "token_id": token.token_id,

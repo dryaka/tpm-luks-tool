@@ -41,6 +41,7 @@ class AuditPolicy:
     event_log: bool = True
     luks_dump: bool = True
     header_backup: bool = True
+    header_backup_dir: str | None = None
     journal: bool = True
 
 
@@ -77,6 +78,8 @@ class VolumeMetadata:
     keyslots: tuple[int, ...]
     tpm_tokens: tuple[TPMToken, ...]
     non_tpm_keyslots: tuple[int, ...]
+    token_bound_keyslots: tuple[int, ...] = ()
+    recovery_keyslots: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -96,3 +99,5 @@ class SystemSnapshot:
     pcr_comparisons: tuple[PCRComparison, ...]
     volumes: tuple[VolumeMetadata, ...]
     secure_boot: bool | None
+    pending_transaction_id: str | None = None
+    pending_transaction_state: str | None = None

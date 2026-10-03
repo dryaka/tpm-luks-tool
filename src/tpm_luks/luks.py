@@ -15,14 +15,19 @@ class LUKSMetadataReader:
     def __init__(self, runner: Runner):
         self.runner = runner
 
-    def read(self, volume: VolumePolicy) -> VolumeMetadata:
+    def read_document(self, volume: VolumePolicy) -> tuple[dict[str, Any], VolumeMetadata]:
         device = str(volume.device_path)
         result = self.runner.run(["cryptsetup", "luksDump", "--dump-json-metadata", device])
         try:
             metadata = json.loads(result.stdout)
         except json.JSONDecodeError as exc:
             raise LUKSMetadataError(f"invalid LUKS2 JSON metadata for {volume.name}: {exc}") from exc
-        return parse_luks_metadata(volume, device, metadata)
+        if not isinstance(metadata, dict):
+            raise LUKSMetadataError(f"LUKS2 JSON metadata for {volume.name} is not an object")
+        return metadata, parse_luks_metadata(volume, device, metadata)
+
+    def read(self, volume: VolumePolicy) -> VolumeMetadata:
+        return self.read_document(volume)[1]
 
 
 def _numeric_ids(mapping: Any, field: str) -> tuple[int, ...]:
@@ -37,6 +42,16 @@ def _numeric_ids(mapping: Any, field: str) -> tuple[int, ...]:
     return tuple(sorted(result))
 
 
+def _token_keyslots(token_id: str, token: dict[str, Any]) -> tuple[int, ...]:
+    raw_keyslots = token.get("keyslots", [])
+    if not isinstance(raw_keyslots, list):
+        raise LUKSMetadataError(f"token {token_id} has invalid keyslots field")
+    try:
+        return tuple(sorted(int(item) for item in raw_keyslots))
+    except (TypeError, ValueError) as exc:
+        raise LUKSMetadataError(f"token {token_id} has a non-numeric keyslot") from exc
+
+
 def parse_luks_metadata(volume: VolumePolicy, device: str, metadata: dict[str, Any]) -> VolumeMetadata:
     if not isinstance(metadata, dict):
         raise LUKSMetadataError("LUKS2 metadata root must be an object")
@@ -49,21 +64,18 @@ def parse_luks_metadata(volume: VolumePolicy, device: str, metadata: dict[str, A
 
     tpm_tokens: list[TPMToken] = []
     tpm_keyslots: set[int] = set()
+    all_token_keyslots: set[int] = set()
     for raw_token_id, token in tokens_raw.items():
-        if not isinstance(token, dict) or token.get("type") != "systemd-tpm2":
+        if not isinstance(token, dict):
+            raise LUKSMetadataError(f"token {raw_token_id} must be an object")
+        token_keyslots = _token_keyslots(str(raw_token_id), token)
+        all_token_keyslots.update(token_keyslots)
+        if token.get("type") != "systemd-tpm2":
             continue
         try:
             token_id = int(raw_token_id)
         except (TypeError, ValueError) as exc:
             raise LUKSMetadataError(f"invalid token identifier: {raw_token_id!r}") from exc
-
-        raw_keyslots = token.get("keyslots", [])
-        if not isinstance(raw_keyslots, list):
-            raise LUKSMetadataError(f"TPM token {token_id} has invalid keyslots field")
-        try:
-            token_keyslots = tuple(sorted(int(item) for item in raw_keyslots))
-        except (TypeError, ValueError) as exc:
-            raise LUKSMetadataError(f"TPM token {token_id} has a non-numeric keyslot") from exc
 
         raw_pcrs = token.get("tpm2-pcrs", [])
         if not isinstance(raw_pcrs, list) or any(type(item) is not int for item in raw_pcrs):
@@ -77,7 +89,7 @@ def parse_luks_metadata(volume: VolumePolicy, device: str, metadata: dict[str, A
             TPMToken(
                 token_id=token_id,
                 keyslots=token_keyslots,
-                pcrs=tuple(raw_pcrs),
+                pcrs=tuple(sorted(raw_pcrs)),
                 bank=bank,
             )
         )
@@ -89,4 +101,6 @@ def parse_luks_metadata(volume: VolumePolicy, device: str, metadata: dict[str, A
         keyslots=keyslots,
         tpm_tokens=tuple(sorted(tpm_tokens, key=lambda token: token.token_id)),
         non_tpm_keyslots=tuple(slot for slot in keyslots if slot not in tpm_keyslots),
+        token_bound_keyslots=tuple(sorted(all_token_keyslots)),
+        recovery_keyslots=tuple(slot for slot in keyslots if slot not in all_token_keyslots),
     )

@@ -22,4 +22,7 @@ minimum_recovery_slots = 1
 event_log = true
 luks_dump = true
 header_backup = true
+# Must be an existing, protected location outside the runtime state directory.
+# Prefer storage independent of the LUKS volumes being modified.
+header_backup_dir = "/mnt/secure-backup/tpm-luks"
 journal = true
