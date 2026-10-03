@@ -76,7 +76,7 @@ Start from:
 cp examples/tpm-luks.toml ./test-policy.toml
 ```
 
-When header backup is enabled, `audit.header_backup_dir` must point to an existing protected directory outside the runtime state directory. For transactional rollback, another independent filesystem on the same machine is acceptable (for example, a separate Btrfs filesystem or mirror). Off-machine or otherwise independent storage provides stronger protection against whole-disk or whole-machine loss.
+When header backup is enabled, `audit.header_backup_dir` must point to an existing protected directory outside the runtime state directory. For transactional rollback, another independent filesystem on the same machine is acceptable. Off-machine or otherwise independent storage provides stronger protection against whole-disk or whole-machine loss.
 
 The example deliberately uses a placeholder backup path:
 
