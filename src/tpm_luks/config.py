@@ -56,9 +56,9 @@ def load_policy(path: str | Path) -> Policy:
     if not isinstance(device, str) or not device:
         raise PolicyError("tpm.device must be a non-empty string")
     if device != "auto":
-        raise PolicyError("Phase 1 supports only tpm.device = 'auto'")
+        raise PolicyError("current implementation supports only tpm.device = 'auto'")
     if bank != "sha256":
-        raise PolicyError("Phase 1 supports only tpm.bank = 'sha256'")
+        raise PolicyError("current implementation supports only tpm.bank = 'sha256'")
     if not isinstance(pcrs, list) or not pcrs:
         raise PolicyError("tpm.pcrs must be a non-empty array")
     if any(type(pcr) is not int or not 0 <= pcr <= 23 for pcr in pcrs):
@@ -114,7 +114,17 @@ def load_policy(path: str | Path) -> Policy:
     audit_data = data.get("audit", {})
     if not isinstance(audit_data, dict):
         raise PolicyError("audit must be a TOML table")
-    _reject_unknown(audit_data, {"event_log", "luks_dump", "header_backup", "journal"}, "audit")
+    _reject_unknown(
+        audit_data,
+        {"event_log", "luks_dump", "header_backup", "header_backup_dir", "journal"},
+        "audit",
+    )
+    header_backup_dir = audit_data.get("header_backup_dir")
+    if header_backup_dir is not None:
+        if not isinstance(header_backup_dir, str) or not header_backup_dir.strip():
+            raise PolicyError("audit.header_backup_dir must be a non-empty string")
+        if not Path(header_backup_dir).is_absolute():
+            raise PolicyError("audit.header_backup_dir must be an absolute path")
 
     return Policy(
         policy_name=policy_name.strip(),
@@ -129,6 +139,7 @@ def load_policy(path: str | Path) -> Policy:
             event_log=_expect_bool(audit_data, "event_log", True),
             luks_dump=_expect_bool(audit_data, "luks_dump", True),
             header_backup=_expect_bool(audit_data, "header_backup", True),
+            header_backup_dir=header_backup_dir,
             journal=_expect_bool(audit_data, "journal", True),
         ),
     )

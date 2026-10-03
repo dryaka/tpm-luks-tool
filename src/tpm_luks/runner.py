@@ -22,7 +22,14 @@ class CommandError(RuntimeError):
 
 
 class Runner:
-    def run(self, argv: Sequence[str], *, check: bool = True) -> CommandResult:
+    def run(
+        self,
+        argv: Sequence[str],
+        *,
+        check: bool = True,
+        timeout: float | None = 20,
+        capture_output: bool = True,
+    ) -> CommandResult:
         args = tuple(str(item) for item in argv)
         env = os.environ.copy()
         env["LC_ALL"] = "C"
@@ -30,15 +37,20 @@ class Runner:
             completed = subprocess.run(
                 args,
                 check=False,
-                capture_output=True,
+                capture_output=capture_output,
                 text=True,
                 env=env,
-                timeout=20,
+                timeout=timeout,
             )
         except subprocess.TimeoutExpired as exc:
             result = CommandResult(args, 124, exc.stdout or "", f"command timed out after {exc.timeout}s")
             raise CommandError(result) from exc
-        result = CommandResult(args, completed.returncode, completed.stdout, completed.stderr)
+        result = CommandResult(
+            args,
+            completed.returncode,
+            completed.stdout or "",
+            completed.stderr or "",
+        )
         if check and result.returncode != 0:
             raise CommandError(result)
         return result

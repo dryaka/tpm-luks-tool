@@ -164,6 +164,7 @@ minimum_recovery_slots = 1
 event_log = true
 luks_dump = true
 header_backup = true
+header_backup_dir = "/mnt/secure-backup/tpm-luks"
 journal = true
 ```
 
@@ -179,9 +180,9 @@ Runtime state is stored separately from policy configuration:
 ├── history/
 │   └── <transaction-id>/
 │       ├── manifest.json
-│       ├── pcrs-before.txt
-│       ├── pcrs-after.txt
-│       ├── tpm-eventlog.yaml
+│       ├── pcrs-before.json
+│       ├── pcrs-after.json
+│       ├── tpm-eventlog-before.bin
 │       ├── <volume>-before.json
 │       ├── <volume>-after-enroll.json
 │       ├── <volume>-after-cleanup.json
@@ -189,7 +190,11 @@ Runtime state is stored separately from policy configuration:
 └── ...
 ```
 
-LUKS header backups contain sensitive recovery metadata and must not be treated as ordinary audit files. If header backup is enabled, its storage location must be explicitly configured and should normally be outside the protected local volume.
+LUKS header backups contain sensitive recovery metadata and must not be treated as ordinary audit files. If header backup is enabled, `audit.header_backup_dir` must be explicitly configured. Phase 2 requires this directory to exist and to be outside the runtime state directory.
+
+For protection against a failed header modification, another independent filesystem on the same machine is sufficient. Off-machine or otherwise independent storage is stronger when protection against whole-disk or whole-machine loss is also required.
+
+The sensitivity of a header backup does not come from the live LUKS header being inherently secret. A backup preserves historical keyslot and authentication state. Restoring an older header can therefore re-enable a keyslot or authentication method that was later removed or rotated, if the corresponding secret is still available. Old header backups must consequently have an explicit retention and disposal policy.
 
 The repository must never contain runtime state, LUKS headers, TPM blobs captured from production systems, passwords, keys, or other private material.
 
@@ -214,6 +219,8 @@ The tool must distinguish:
 - **Policy change** — PCR bank or selected PCR set changes.
 
 A policy change always requires explicit re-enrollment.
+
+In Phase 2, the operator's confirmed `reenroll` transaction is the trust-approval action. The approved PCR state is updated only after all configured volumes have received and passed verification of their new TPM enrollment and the selected PCR values are confirmed unchanged. The transaction then remains `PENDING_BOOT_TEST` until Phase 3 cleanup after a successful reboot.
 
 ## 8. CLI responsibilities
 
@@ -283,16 +290,20 @@ capture after-enrollment evidence
 mark transaction PENDING_BOOT_TEST
 ```
 
-Enrollment is performed using the configured policy, conceptually:
+Enrollment is performed using the configured policy and the exact PCR digests captured during preflight, conceptually:
 
 ```text
 systemd-cryptenroll
   --tpm2-device=<configured-device>
-  --tpm2-pcrs=<configured-PCR-list>
+  --tpm2-pcrs=<PCR>:<bank>=<captured-digest>[+...]
+  --tpm2-pcrlock=
+  --tpm2-with-pin=no
   <volume>
 ```
 
-The tool must not remove old TPM enrollments during this command.
+Binding to the captured digest avoids silently enrolling against a different PCR value if the measured state changes between preflight and enrollment. Automatic `pcrlock` discovery is disabled because it is outside the configured policy model. If systemd's automatic signed-PCR public-key file is present, Phase 2 refuses enrollment rather than silently adding signed-policy semantics that the tool does not yet manage.
+
+The tool must not remove old TPM enrollments during this command. Enrollment is verified as additive: existing keyslots and TPM tokens must remain, exactly one new TPM token/keyslot pair must appear, and configured passphrase/recovery access must remain present.
 
 ### `tpm-luks cleanup`
 
@@ -410,7 +421,10 @@ FAILED_PRECHECK
 FAILED_ENROLLMENT
 FAILED_VERIFICATION
 FAILED_CLEANUP
+CANCELLED
 ```
+
+`CANCELLED` is used when the operator declines the plan after evidence capture but before any LUKS metadata change.
 
 A partial enrollment across multiple volumes must never be silently treated as complete.
 
@@ -550,11 +564,18 @@ The implementation must maintain these invariants:
 
 ### Phase 2 — safe enrollment
 
-- transaction creation,
-- evidence capture,
-- recovery-slot validation,
-- `reenroll`,
-- post-enrollment verification.
+Implemented:
+
+- transaction creation and private on-disk state,
+- pre-change PCR, TPM event-log, and optional LUKS metadata evidence,
+- passphrase/recovery keyslot validation,
+- explicit LUKS header backup location and pre-change backups,
+- operator confirmation,
+- additive `reenroll`,
+- exact captured-PCR binding,
+- post-enrollment token/keyslot verification,
+- approved-state update,
+- `PENDING_BOOT_TEST` hand-off to Phase 3.
 
 ### Phase 3 — cleanup
 

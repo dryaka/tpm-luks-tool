@@ -41,6 +41,7 @@ def collect_snapshot(
             comparisons.append(PCRComparison(pcr, old_value, current[pcr], matches))
 
     volumes = tuple(luks_reader.read(volume) for volume in policy.volumes)
+    active = state_store.find_active_transaction()
     return SystemSnapshot(
         policy=policy,
         current_pcrs=current,
@@ -49,4 +50,6 @@ def collect_snapshot(
         pcr_comparisons=tuple(comparisons),
         volumes=volumes,
         secure_boot=read_secure_boot(),
+        pending_transaction_id=str(active.get("id")) if active else None,
+        pending_transaction_state=str(active.get("state")) if active else None,
     )
