@@ -269,6 +269,15 @@ def _run_reenroll(args: argparse.Namespace) -> int:
             return EXIT_OK
     print("Enrollment may now request an existing LUKS passphrase/recovery key for each volume.")
     manifest = service.execute(plan)
+    for name, volume in manifest.get("volumes", {}).items():
+        result = volume.get("enrollment_result")
+        if result == "ADDED":
+            print(
+                f"{name}: added TPM token {volume.get('new_token')} "
+                f"on keyslot {volume.get('new_keyslot')}"
+            )
+        elif result == "ALREADY_PRESENT":
+            print(f"{name}: equivalent TPM policy already present; no metadata change")
     print(f"Transaction {plan.transaction_id}: {manifest['state']}")
     print("Reboot and verify TPM unlock before any obsolete TPM enrollment is removed.")
     return EXIT_OK

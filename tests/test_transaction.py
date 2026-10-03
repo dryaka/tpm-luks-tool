@@ -124,6 +124,7 @@ class TransactionTests(unittest.TestCase):
             manifest = service.execute(plan)
             self.assertEqual(manifest["state"], "PENDING_BOOT_TEST")
             stored = StateStore(directory).load_manifest(plan.transaction_id)
+            self.assertEqual(stored["volumes"]["A"]["enrollment_result"], "ADDED")
             self.assertEqual(stored["volumes"]["A"]["new_token"], 2)
             self.assertEqual(stored["volumes"]["A"]["new_keyslot"], 3)
             approved = StateStore(directory).load_approved_state()
@@ -134,6 +135,33 @@ class TransactionTests(unittest.TestCase):
             self.assertIn("--tpm2-with-pin=no", enroll_call[0])
             self.assertIsNone(enroll_call[1]["timeout"])
             self.assertFalse(enroll_call[1]["capture_output"])
+
+    def test_existing_exact_enrollment_is_idempotent_and_other_volume_progresses(self):
+        with tempfile.TemporaryDirectory() as directory:
+            service, runner = self._service(directory)
+            service.luks_reader.before["A"] = after_volume("A", UUID_A)
+            original_run = runner.run
+
+            def no_op_a(argv, **kwargs):
+                args = tuple(str(x) for x in argv)
+                if args[0] == "systemd-cryptenroll" and UUID_A in args[-1]:
+                    runner.calls.append((args, kwargs))
+                    return CommandResult(args, 0, "", "")
+                return original_run(argv, **kwargs)
+
+            runner.run = no_op_a
+            plan = service.prepare()
+            manifest = service.execute(plan)
+
+            self.assertEqual(manifest["state"], "PENDING_BOOT_TEST")
+            stored = StateStore(directory).load_manifest(plan.transaction_id)
+            self.assertEqual(stored["volumes"]["A"]["enrollment_result"], "ALREADY_PRESENT")
+            self.assertIsNone(stored["volumes"]["A"]["new_token"])
+            self.assertIsNone(stored["volumes"]["A"]["new_keyslot"])
+            self.assertEqual(stored["volumes"]["B"]["enrollment_result"], "ADDED")
+            self.assertEqual(stored["volumes"]["B"]["new_token"], 2)
+            self.assertEqual(stored["volumes"]["B"]["new_keyslot"], 3)
+            self.assertEqual(StateStore(directory).load_approved_state().values[7], PCR)
 
     def test_enrollment_interrupt_is_durable_and_identifies_volume(self):
         with tempfile.TemporaryDirectory() as directory:

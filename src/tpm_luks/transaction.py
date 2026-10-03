@@ -128,6 +128,7 @@ class EnrollmentService:
                     "uuid": volume.uuid,
                     "before": _volume_summary(volume),
                     "header_backup": None,
+                    "enrollment_result": None,
                     "new_token": None,
                     "new_keyslot": None,
                 }
@@ -219,7 +220,7 @@ class EnrollmentService:
 
             try:
                 document, after = self.luks_reader.read_document(volume_policy)
-                new_token, new_keyslot = self._verify_additive_enrollment(before, after)
+                enrollment_result, new_token, new_keyslot = self._verify_enrollment(before, after)
                 if self.policy.audit.luks_dump:
                     self.state_store.write_evidence_json(
                         plan.transaction_id,
@@ -228,7 +229,8 @@ class EnrollmentService:
                     )
                 manifest = self.state_store.load_manifest(plan.transaction_id)
                 volume_entry = manifest["volumes"][volume_policy.name]
-                volume_entry["new_token"] = new_token.token_id
+                volume_entry["enrollment_result"] = enrollment_result
+                volume_entry["new_token"] = new_token.token_id if new_token else None
                 volume_entry["new_keyslot"] = new_keyslot
                 volume_entry["after_enroll"] = _volume_summary(after)
                 self.state_store.write_manifest(plan.transaction_id, manifest)
@@ -371,11 +373,11 @@ class EnrollmentService:
             str(volume.device_path),
         ]
 
-    def _verify_additive_enrollment(
+    def _verify_enrollment(
         self,
         before: VolumeMetadata,
         after: VolumeMetadata,
-    ) -> tuple[TPMToken, int]:
+    ) -> tuple[str, TPMToken | None, int | None]:
         before_slots = set(before.keyslots)
         after_slots = set(after.keyslots)
         if not before_slots.issubset(after_slots):
@@ -387,6 +389,22 @@ class EnrollmentService:
             raise EnrollmentError("an existing TPM token disappeared during enrollment")
 
         added_token_ids = sorted(set(after_tokens) - before_tokens)
+        added_slots = sorted(after_slots - before_slots)
+
+        if not added_token_ids and not added_slots:
+            if after.keyslots != before.keyslots or after.tpm_tokens != before.tpm_tokens:
+                raise EnrollmentError("enrollment returned success but TPM metadata changed unexpectedly")
+            if not any(
+                token.bank == self.policy.tpm.bank
+                and tuple(sorted(token.pcrs)) == self.policy.tpm.pcrs
+                for token in after.tpm_tokens
+            ):
+                raise EnrollmentError(
+                    "enrollment returned success without metadata changes, but no matching TPM token exists"
+                )
+            self._validate_recovery_after(before, after)
+            return "ALREADY_PRESENT", None, None
+
         if len(added_token_ids) != 1:
             raise EnrollmentError(f"expected exactly one new TPM token, found {len(added_token_ids)}")
         new_token = after_tokens[added_token_ids[0]]
@@ -399,7 +417,6 @@ class EnrollmentService:
                 f"new TPM token PCRs {new_token.pcrs!r} do not match policy {self.policy.tpm.pcrs!r}"
             )
 
-        added_slots = sorted(after_slots - before_slots)
         if len(added_slots) != 1:
             raise EnrollmentError(f"expected exactly one new keyslot, found {len(added_slots)}")
         new_keyslot = added_slots[0]
@@ -408,13 +425,20 @@ class EnrollmentService:
                 f"new TPM token references keyslots {new_token.keyslots!r}, expected ({new_keyslot},)"
             )
 
+        self._validate_recovery_after(before, after)
+        return "ADDED", new_token, new_keyslot
+
+    def _validate_recovery_after(
+        self,
+        before: VolumeMetadata,
+        after: VolumeMetadata,
+    ) -> None:
         if self.policy.luks.preserve_non_tpm_slots:
             if not set(before.recovery_keyslots).issubset(after.recovery_keyslots):
                 raise EnrollmentError("a passphrase/recovery keyslot disappeared during enrollment")
         minimum = self.policy.luks.minimum_recovery_slots if self.policy.luks.require_recovery_slot else 0
         if len(after.recovery_keyslots) < minimum:
             raise EnrollmentError("recovery keyslot policy is no longer satisfied after enrollment")
-        return new_token, new_keyslot
 
     def _mark_failure(
         self,
