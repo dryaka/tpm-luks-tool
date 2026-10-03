@@ -2,7 +2,7 @@ import contextlib
 import io
 import unittest
 
-from tpm_luks.cli import build_parser
+from tpm_luks.cli import build_parser, main
 
 
 class CLIHelpTests(unittest.TestCase):
@@ -12,6 +12,14 @@ class CLIHelpTests(unittest.TestCase):
         with contextlib.redirect_stdout(stream):
             with self.assertRaises(SystemExit) as exit_context:
                 parser.parse_args([command, "--help"])
+        self.assertEqual(exit_context.exception.code, 0)
+        return stream.getvalue()
+
+    def _main_help(self, argv: list[str]) -> str:
+        stream = io.StringIO()
+        with contextlib.redirect_stdout(stream):
+            with self.assertRaises(SystemExit) as exit_context:
+                main(argv)
         self.assertEqual(exit_context.exception.code, 0)
         return stream.getvalue()
 
@@ -67,6 +75,42 @@ class CLIHelpTests(unittest.TestCase):
         )
         self.assertEqual(args.config, "./policy.toml")
         self.assertEqual(args.state_dir, "./state")
+
+    def test_short_help_before_command_targets_command(self):
+        help_text = self._main_help(["-h", "show"])
+        self.assertIn("usage: tpm-luks show", help_text)
+        self.assertIn("Display one transaction manifest", help_text)
+
+    def test_long_help_before_command_targets_command(self):
+        help_text = self._main_help(["--help", "history"])
+        self.assertIn("usage: tpm-luks history", help_text)
+        self.assertIn("List transaction manifests", help_text)
+
+    def test_help_before_command_with_other_global_options(self):
+        help_text = self._main_help(
+            ["--state-dir", "./state", "--help", "history"]
+        )
+        self.assertIn("usage: tpm-luks history", help_text)
+        self.assertIn("--state-dir PATH", help_text)
+
+    def test_help_after_command_still_targets_command(self):
+        help_text = self._main_help(
+            ["--state-dir", "./state", "history", "--help"]
+        )
+        self.assertIn("usage: tpm-luks history", help_text)
+
+    def test_option_value_named_like_command_is_not_misdetected(self):
+        help_text = self._main_help(
+            ["--config", "show", "--help", "status"]
+        )
+        self.assertIn("usage: tpm-luks status", help_text)
+        self.assertIn("Inspect the configured PCR policy", help_text)
+
+    def test_help_without_command_remains_top_level(self):
+        help_text = self._main_help(["--help"])
+        self.assertIn("usage: tpm-luks ", help_text)
+        self.assertIn("commands:", help_text)
+        self.assertNotIn("usage: tpm-luks status", help_text)
 
 
 if __name__ == "__main__":
