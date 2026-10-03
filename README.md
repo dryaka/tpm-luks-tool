@@ -45,6 +45,7 @@ Phase 2 adds safe enrollment:
 - optional LUKS header backup before any enrollment,
 - explicit operator confirmation,
 - additive `systemd-cryptenroll` enrollment only,
+- idempotent handling when the exact TPM policy is already enrolled,
 - post-enrollment token/keyslot verification,
 - exact PCR-value binding for the configured policy,
 - approved-state update only after every configured volume verifies,
@@ -131,10 +132,11 @@ The command:
 3. shows the exact plan,
 4. asks for confirmation,
 5. backs up every configured LUKS header when enabled,
-6. adds one new TPM enrollment per volume,
-7. verifies that the change was additive and matches the configured PCR policy,
-8. records the approved PCR state,
-9. finishes as `PENDING_BOOT_TEST`.
+6. adds one new TPM enrollment per volume when the exact policy is not already present,
+7. accepts systemd's successful exact-policy no-op as `ALREADY_PRESENT`,
+8. verifies that no existing keyslot/token disappeared and recovery access remains,
+9. records the approved PCR state,
+10. finishes as `PENDING_BOOT_TEST`.
 
 `systemd-cryptenroll` may request an existing LUKS passphrase or recovery key for each volume.
 

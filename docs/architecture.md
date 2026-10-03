@@ -303,7 +303,9 @@ systemd-cryptenroll
 
 Binding to the captured digest avoids silently enrolling against a different PCR value if the measured state changes between preflight and enrollment. Automatic `pcrlock` discovery is disabled because it is outside the configured policy model. If systemd's automatic signed-PCR public-key file is present, Phase 2 refuses enrollment rather than silently adding signed-policy semantics that the tool does not yet manage.
 
-The tool must not remove old TPM enrollments during this command. Enrollment is verified as additive: existing keyslots and TPM tokens must remain, exactly one new TPM token/keyslot pair must appear, and configured passphrase/recovery access must remain present.
+The tool must not remove old TPM enrollments during this command. Enrollment is normally verified as additive: existing keyslots and TPM tokens must remain, exactly one new TPM token/keyslot pair must appear, and configured passphrase/recovery access must remain present.
+
+`systemd-cryptenroll` is idempotent for an already enrolled exact TPM policy hash. When it returns success without changing LUKS TPM metadata, the tool records the per-volume result as `ALREADY_PRESENT` rather than failing verification. This allows a new transaction to safely continue after a previous partial multi-volume enrollment. No cleanup candidate is inferred from an `ALREADY_PRESENT` result, because the current transaction did not create a distinguishable replacement token.
 
 ### `tpm-luks cleanup`
 
@@ -437,7 +439,7 @@ Volumes configured under one policy form one logical management set.
 For re-enrollment:
 
 - all configured volumes are inspected before modification,
-- each new TPM enrollment is recorded independently,
+- each per-volume outcome is recorded independently as `ADDED` or `ALREADY_PRESENT`,
 - failure on one volume stops further destructive progression,
 - old TPM enrollments remain until all new enrollments have been verified,
 - cleanup proceeds only against the exact obsolete objects recorded in the transaction.
