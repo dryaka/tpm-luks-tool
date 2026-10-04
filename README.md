@@ -64,7 +64,24 @@ source .venv/bin/activate
 python -m pip install -e .
 ```
 
-Native RPM/DEB packaging is planned for normal administrator installation.
+Native RPM and DEB packaging is provided for normal administrator installation. See [docs/packaging.md](docs/packaging.md).
+
+## Native package installation
+
+Build native packages from a clean checkout with:
+
+```bash
+sh packaging/build-rpm.sh
+sh packaging/build-deb.sh
+```
+
+Artifacts are written under `dist/rpm/` and `dist/deb/`. The package installs
+`/usr/bin/tpm-luks` and a package-managed `/etc/tpm-luks.toml`; runtime state
+under `/var/lib/tpm-luks` remains outside package ownership.
+
+See [docs/packaging.md](docs/packaging.md) for supported distribution baselines,
+build dependencies, installation, upgrade/removal semantics, and licensing
+notes.
 
 ## Configuration
 
@@ -214,3 +231,14 @@ PYTHONPATH=src python3 -m unittest discover -s tests -v
 ```
 
 See [docs/architecture.md](docs/architecture.md) for the architecture and safety model.
+
+
+## Author and license
+
+Author and copyright holder: **Aleš Dryák**.
+
+Contact: **ales.dryak@volny.cz**
+
+Copyright (C) 2026 Aleš Dryák.
+
+This project is licensed under the **GNU General Public License version 3 or later (GPL-3.0-or-later)**. See [LICENSE](LICENSE).
