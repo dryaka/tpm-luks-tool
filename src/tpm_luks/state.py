@@ -43,7 +43,7 @@ class StateStore:
         return self.root / "history"
 
     def load_policy_states(self) -> tuple[PCRState | None, PCRState | None]:
-        if not self.state_path.exists():
+        if not self._path_exists(self.state_path):
             return None, None
         data = self._load_json(self.state_path)
 
@@ -189,10 +189,31 @@ class StateStore:
         self._atomic_write_bytes(path, data)
 
     def list_history(self) -> list[dict[str, Any]]:
-        if not self.history_path.exists():
+        try:
+            entries = list(os.scandir(self.history_path))
+        except FileNotFoundError:
             return []
+        except OSError as exc:
+            raise StateError(
+                f"cannot read history directory {self.history_path}: {exc}"
+            ) from exc
+
+        manifest_paths: list[Path] = []
+        for entry in entries:
+            try:
+                if not entry.is_dir(follow_symlinks=False):
+                    continue
+            except OSError as exc:
+                raise StateError(
+                    f"cannot inspect history entry {entry.path}: {exc}"
+                ) from exc
+
+            manifest_path = Path(entry.path) / "manifest.json"
+            if self._path_exists(manifest_path):
+                manifest_paths.append(manifest_path)
+
         manifests: list[dict[str, Any]] = []
-        for path in sorted(self.history_path.glob("*/manifest.json"), reverse=True):
+        for path in sorted(manifest_paths, reverse=True):
             data = self._load_json(path)
             data.setdefault("id", path.parent.name)
             manifests.append(data)
@@ -208,7 +229,7 @@ class StateStore:
     def load_manifest(self, transaction_id: str) -> dict[str, Any]:
         self._validate_transaction_id(transaction_id)
         path = self.history_path / transaction_id / "manifest.json"
-        if not path.exists():
+        if not self._path_exists(path):
             raise StateError(f"transaction not found: {transaction_id}")
         return self._load_json(path)
 
@@ -340,6 +361,16 @@ class StateStore:
     def _validate_transaction_id(transaction_id: str) -> None:
         if not _TRANSACTION_ID.fullmatch(transaction_id):
             raise StateError("invalid transaction id")
+
+    @staticmethod
+    def _path_exists(path: Path) -> bool:
+        try:
+            path.stat()
+        except FileNotFoundError:
+            return False
+        except OSError as exc:
+            raise StateError(f"cannot access {path}: {exc}") from exc
+        return True
 
     @staticmethod
     def _ensure_private_dir(path: Path) -> None:
