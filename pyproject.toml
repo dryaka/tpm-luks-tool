@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,8 +7,13 @@ name = "tpm-luks-tool"
 version = "0.4.0"
 description = "Policy-driven TPM2-bound LUKS2 management"
 readme = "README.md"
+authors = [{name = "Aleš Dryák", email = "ales.dryak@volny.cz"}]
+license = {file = "LICENSE"}
 requires-python = ">=3.11"
 dependencies = []
+classifiers = [
+  "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
+]
 
 [project.scripts]
 tpm-luks = "tpm_luks.cli:main"

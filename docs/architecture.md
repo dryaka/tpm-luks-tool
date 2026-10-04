@@ -700,6 +700,23 @@ Implemented:
 - desired-to-operational promotion on successful cleanup,
 - `COMPLETE` transaction state.
 
+### Packaging milestone — native installation
+
+Implemented before Phase 4:
+
+- native RPM package for Fedora and Rocky Linux 9,
+- native DEB package for Debian and Ubuntu,
+- Python 3.11 selection on Rocky Linux 9,
+- package-managed `/etc/tpm-luks.toml`,
+- runtime/audit state excluded from package ownership,
+- RPM `%config(noreplace)` and Debian conffile upgrade semantics,
+- package build helpers with application/package version checks,
+- package CI on Fedora current, Rocky Linux 9, Debian 12, and Ubuntu 24.04,
+- workflow artifacts for built RPM/DEB inspection.
+
+Packaging details and administrator build/install instructions are documented in
+[packaging.md](packaging.md).
+
 ### Phase 4 — drift explanation and integration
 
 - TPM event-log parser integration,

@@ -1,0 +1,28 @@
+Source: tpm-luks-tool
+Section: admin
+Priority: optional
+Maintainer: Aleš Dryák <ales.dryak@volny.cz>
+Build-Depends:
+ debhelper-compat (= 13),
+ dh-sequence-python3,
+ pybuild-plugin-pyproject,
+ python3-all,
+ python3-setuptools,
+ python3-wheel
+Standards-Version: 4.6.2
+Rules-Requires-Root: no
+Homepage: https://github.com/dryaka/tpm-luks-tool
+
+Package: tpm-luks-tool
+Architecture: all
+Depends:
+ ${misc:Depends},
+ ${python3:Depends},
+ python3 (>= 3.11),
+ cryptsetup,
+ systemd
+Description: policy-driven TPM2-bound LUKS2 management tool
+ tpm-luks-tool manages TPM2-bound LUKS2 unlock across one or more
+ encrypted volumes. It separates PCR trust approval, TPM enrollment
+ reconciliation, reboot verification, and cleanup of obsolete TPM
+ enrollments while preserving configured recovery access.
