@@ -48,13 +48,18 @@ def format_status(snapshot: SystemSnapshot) -> str:
         f"State:       {snapshot.drift_state.value}",
         f"Workflow:    {pending}",
         "",
-        "PCR  OPERATIONAL      DESIRED          OP       TARGET   CURRENT",
+        "PCR state:",
     ]
     for item in snapshot.pcr_comparisons:
-        lines.append(
-            f"{item.pcr:<4} {_short(item.operational):<16} {_short(item.desired):<16} "
-            f"{_match_text(item.matches_operational):<8} "
-            f"{_match_text(item.matches_desired):<8} {item.current}"
+        lines.extend(
+            [
+                f"  PCR {item.pcr}:",
+                f"    Operational:       {item.operational or '-'}",
+                f"    Desired:           {item.desired or '-'}",
+                f"    Current:           {item.current}",
+                f"    Operational match: {_match_text(item.matches_operational)}",
+                f"    Desired match:     {_match_text(item.matches_desired)}",
+            ]
         )
 
     for volume in snapshot.volumes:
@@ -80,7 +85,7 @@ def format_status(snapshot: SystemSnapshot) -> str:
                 bank = token.bank or "unspecified"
                 slots = ",".join(map(str, token.keyslots)) or "none"
                 policy_hash = (
-                    ",".join(_short(value) for value in token.policy_hashes)
+                    ",".join(token.policy_hashes)
                     if token.policy_hashes
                     else "unknown"
                 )
