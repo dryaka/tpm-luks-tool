@@ -84,14 +84,15 @@ def format_status(snapshot: SystemSnapshot) -> str:
                 pcrs = "+".join(map(str, token.pcrs)) or "none"
                 bank = token.bank or "unspecified"
                 slots = ",".join(map(str, token.keyslots)) or "none"
-                lines.append(
-                    f"    token {token.token_id}: keyslot={slots} bank={bank} pcrs={pcrs}"
+                policy_hash = (
+                    ",".join(token.policy_hashes)
+                    if token.policy_hashes
+                    else "unknown"
                 )
-                if token.policy_hashes:
-                    for policy_hash in token.policy_hashes:
-                        lines.append(f"      policy hash: {policy_hash}")
-                else:
-                    lines.append("      policy hash: unknown")
+                lines.append(
+                    f"    token {token.token_id}: keyslot={slots} bank={bank} "
+                    f"pcrs={pcrs} policy={policy_hash}"
+                )
     return "\n".join(lines)
 
 
