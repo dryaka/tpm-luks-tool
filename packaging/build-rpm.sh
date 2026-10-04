@@ -72,7 +72,7 @@ preflight_build_dependencies() {
     missing_packages=""
 
     for package in $required_packages; do
-        if ! rpm -q "$package" >/dev/null 2>&1; then
+        if ! rpm -q --whatprovides "$package" >/dev/null 2>&1; then
             if [ -z "$missing_packages" ]; then
                 missing_packages=$package
             else
