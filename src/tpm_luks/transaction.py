@@ -7,10 +7,10 @@ from pathlib import Path
 from typing import Any
 
 from .luks import LUKSMetadataReader
-from .models import ApprovedState, DriftState, Policy, SystemSnapshot, TPMToken, VolumeMetadata, VolumePolicy
+from .models import PCRState, Policy, SystemSnapshot, TPMToken, VolumeMetadata, VolumePolicy
 from .pcr import PCRReader
 from .runner import CommandError, Runner
-from .service import collect_snapshot
+from .service import collect_snapshot, state_matches_policy
 from .state import StateError, StateStore
 
 
@@ -28,6 +28,10 @@ class EnrollmentPlan:
     transaction_type: str
     snapshot: SystemSnapshot
     header_backup_dir: str | None
+    target_pcrs: dict[int, str]
+    target_source: str
+    previous_state: str
+    transaction_created: bool
 
 
 _AUTO_PUBLIC_KEY_PATHS = (
@@ -89,49 +93,113 @@ class EnrollmentService:
         self.event_log_path = event_log_path
         self.auto_public_key_paths = auto_public_key_paths
 
-    def prepare(self, *, force: bool = False) -> EnrollmentPlan:
-        active = self.state_store.find_active_transaction()
-        if active is not None:
-            raise EnrollmentError(
-                f"transaction {active.get('id')} is already {active.get('state')}; "
-                "finish or repair it before starting another enrollment"
-            )
-
+    def prepare(self) -> EnrollmentPlan:
         snapshot = collect_snapshot(
             self.policy,
             self.pcr_reader,
             self.luks_reader,
             self.state_store,
         )
-        if snapshot.drift_state == DriftState.MATCH and not force:
-            raise EnrollmentError("current PCR state already matches the approved state; use --force to re-enroll")
+        active = self.state_store.find_active_transaction()
+        transaction_created = False
+
+        if active is not None:
+            state = str(active.get("state"))
+            if active.get("workflow_version") != 2 or state not in {
+                "APPROVED_PENDING_ENROLLMENT",
+                "ENROLLING",
+                "FAILED_ENROLLMENT",
+                "FAILED_VERIFICATION",
+            }:
+                raise EnrollmentError(
+                    f"transaction {active.get('id')} is already {state}; "
+                    "finish or repair it before starting enrollment"
+                )
+            target_source = str(active.get("target_source", "desired"))
+            target = (
+                snapshot.desired_state
+                if target_source == "desired"
+                else snapshot.operational_state
+            )
+            if target is None:
+                raise EnrollmentError(
+                    f"transaction {active.get('id')} has no {target_source} PCR target"
+                )
+            transaction_id = str(active.get("id"))
+            transaction_type = str(active.get("type", "RECONCILIATION"))
+            previous_state = state
+            self._validate_transaction_context(active)
+        else:
+            if snapshot.desired_state is not None:
+                raise EnrollmentError(
+                    "a desired PCR target exists without an active transaction; manual repair is required"
+                )
+            target = snapshot.operational_state
+            if target is None:
+                raise EnrollmentError(
+                    "no operational PCR target exists; approve the current PCR state first"
+                )
+            if not state_matches_policy(target, self.policy):
+                raise EnrollmentError(
+                    "configured PCR policy differs from the operational baseline; "
+                    "approve the current policy before enrollment"
+                )
+            if snapshot.current_pcrs != target.values:
+                raise EnrollmentError(
+                    "current PCR values differ from the operational baseline and are not approved; "
+                    "run 'tpm-luks approve' first"
+                )
+            transaction_id = self._create_reconciliation_transaction(snapshot, target)
+            transaction_type = "RECONCILIATION"
+            target_source = "operational"
+            previous_state = "APPROVED_PENDING_ENROLLMENT"
+            transaction_created = True
+
+        if not state_matches_policy(target, self.policy):
+            raise EnrollmentError(
+                f"{target_source} PCR target does not match the configured policy"
+            )
+        if snapshot.current_pcrs != target.values:
+            raise EnrollmentError(
+                f"current PCR values no longer match the {target_source} target; "
+                "do not enroll an unapproved state"
+            )
 
         self._validate_recovery_access(snapshot)
         backup_dir = self._validate_header_backup_configuration()
         self._validate_automatic_policy_inputs()
 
-        transaction_type = {
-            DriftState.UNINITIALIZED: "INITIAL_ENROLLMENT",
-            DriftState.DRIFT: "PCR_DRIFT",
-            DriftState.POLICY_CHANGE: "POLICY_CHANGE",
-            DriftState.MATCH: "FORCED_REFRESH",
-        }[snapshot.drift_state]
+        return EnrollmentPlan(
+            transaction_id=transaction_id,
+            transaction_type=transaction_type,
+            snapshot=snapshot,
+            header_backup_dir=str(backup_dir) if backup_dir else None,
+            target_pcrs=dict(target.values),
+            target_source=target_source,
+            previous_state=previous_state,
+            transaction_created=transaction_created,
+        )
+
+    def _create_reconciliation_transaction(
+        self,
+        snapshot: SystemSnapshot,
+        target: PCRState,
+    ) -> str:
         manifest = {
-            "type": transaction_type,
-            "state": "PREPARING",
+            "workflow_version": 2,
+            "target_source": "operational",
+            "type": "RECONCILIATION",
+            "state": "APPROVED_PENDING_ENROLLMENT",
             "created_at": _now(),
+            "approved_at": None,
             "policy": {
                 "name": self.policy.policy_name,
                 "device": self.policy.tpm.device,
                 "bank": self.policy.tpm.bank,
                 "pcrs": list(self.policy.tpm.pcrs),
             },
-            "old_values": (
-                {str(pcr): value for pcr, value in snapshot.approved_state.values.items()}
-                if snapshot.approved_state
-                else {}
-            ),
-            "new_values": {str(pcr): value for pcr, value in snapshot.current_pcrs.items()},
+            "old_values": {str(pcr): value for pcr, value in target.values.items()},
+            "new_values": {str(pcr): value for pcr, value in target.values.items()},
             "secure_boot": snapshot.secure_boot,
             "volumes": {
                 volume.name: {
@@ -146,7 +214,6 @@ class EnrollmentService:
             },
         }
         transaction_id = self.state_store.create_transaction(manifest)
-
         try:
             self.state_store.write_evidence_json(
                 transaction_id,
@@ -164,47 +231,93 @@ class EnrollmentService:
             if self.policy.audit.event_log:
                 self._capture_event_log(transaction_id)
         except KeyboardInterrupt as exc:
-            interruption = EnrollmentInterrupted("interrupted during pre-enrollment evidence capture")
+            interruption = EnrollmentInterrupted(
+                "interrupted during reconciliation evidence capture"
+            )
             self._mark_failure(transaction_id, "FAILED_PRECHECK", interruption)
             raise interruption from exc
         except Exception as exc:
             self._mark_failure(transaction_id, "FAILED_PRECHECK", exc)
-            raise EnrollmentError(f"pre-enrollment evidence capture failed: {exc}") from exc
+            raise EnrollmentError(
+                f"reconciliation evidence capture failed: {exc}"
+            ) from exc
+        return transaction_id
 
-        return EnrollmentPlan(
-            transaction_id=transaction_id,
-            transaction_type=transaction_type,
-            snapshot=snapshot,
-            header_backup_dir=str(backup_dir) if backup_dir else None,
-        )
+    def _validate_transaction_context(self, manifest: dict[str, Any]) -> None:
+        raw_policy = manifest.get("policy")
+        if not isinstance(raw_policy, dict):
+            raise EnrollmentError("active transaction lacks policy metadata")
+        if (
+            raw_policy.get("name") != self.policy.policy_name
+            or raw_policy.get("bank") != self.policy.tpm.bank
+            or tuple(sorted(raw_policy.get("pcrs", []))) != self.policy.tpm.pcrs
+        ):
+            raise EnrollmentError("active transaction policy differs from current configuration")
+        raw_volumes = manifest.get("volumes")
+        if not isinstance(raw_volumes, dict):
+            raise EnrollmentError("active transaction lacks volume metadata")
+        for volume in self.policy.volumes:
+            entry = raw_volumes.get(volume.name)
+            if not isinstance(entry, dict) or entry.get("uuid") != volume.uuid:
+                raise EnrollmentError(
+                    f"active transaction volume {volume.name} differs from current configuration"
+                )
+        if set(raw_volumes) != {volume.name for volume in self.policy.volumes}:
+            raise EnrollmentError("active transaction volume set differs from current configuration")
 
     def cancel(self, plan: EnrollmentPlan) -> None:
-        self.state_store.update_manifest(plan.transaction_id, state="CANCELLED", cancelled_at=_now())
+        if plan.transaction_created:
+            self.state_store.update_manifest(
+                plan.transaction_id,
+                state="CANCELLED",
+                cancelled_at=_now(),
+            )
 
     def execute(self, plan: EnrollmentPlan) -> dict[str, Any]:
         manifest = self.state_store.load_manifest(plan.transaction_id)
-        if manifest.get("state") != "PREPARING":
+        if manifest.get("state") not in {
+            "APPROVED_PENDING_ENROLLMENT",
+            "ENROLLING",
+            "FAILED_ENROLLMENT",
+            "FAILED_VERIFICATION",
+        }:
             raise EnrollmentError(
-                f"transaction {plan.transaction_id} is {manifest.get('state')}, expected PREPARING"
+                f"transaction {plan.transaction_id} is {manifest.get('state')}, "
+                "expected an enrollment-pending state"
             )
+        manifest = self.state_store.update_manifest(
+            plan.transaction_id,
+            state="ENROLLING",
+            enrollment_started_at=_now(),
+        )
 
         if self.policy.audit.header_backup:
             try:
                 manifest = self._backup_headers(plan, manifest)
             except KeyboardInterrupt as exc:
                 interruption = EnrollmentInterrupted("interrupted during LUKS header backup")
-                self._mark_failure(plan.transaction_id, "FAILED_PRECHECK", interruption)
+                self._mark_failure(
+                    plan.transaction_id,
+                    "FAILED_ENROLLMENT",
+                    interruption,
+                )
                 raise interruption from exc
             except Exception as exc:
-                self._mark_failure(plan.transaction_id, "FAILED_PRECHECK", exc)
-                raise EnrollmentError(f"LUKS header backup failed before enrollment: {exc}") from exc
+                self._mark_failure(
+                    plan.transaction_id,
+                    "FAILED_ENROLLMENT",
+                    exc,
+                )
+                raise EnrollmentError(
+                    f"LUKS header backup failed before enrollment: {exc}"
+                ) from exc
 
         before_by_name = {volume.name: volume for volume in plan.snapshot.volumes}
         for volume_policy in self.policy.volumes:
             before = before_by_name[volume_policy.name]
             try:
                 self.runner.run(
-                    self._enrollment_command(volume_policy, plan.snapshot.current_pcrs),
+                    self._enrollment_command(volume_policy, plan.target_pcrs),
                     timeout=None,
                     capture_output=False,
                 )
@@ -266,31 +379,20 @@ class EnrollmentService:
 
         try:
             after_pcrs = self.pcr_reader.read(self.policy.tpm.pcrs, self.policy.tpm.bank)
-            if after_pcrs != plan.snapshot.current_pcrs:
-                raise EnrollmentError("configured PCR values changed during enrollment")
+            if after_pcrs != plan.target_pcrs:
+                raise EnrollmentError("PCR values changed away from the approved enrollment target")
             self.state_store.write_evidence_json(
                 plan.transaction_id,
                 "pcrs-after.json",
                 {str(pcr): value for pcr, value in after_pcrs.items()},
             )
-            approved_at = _now()
-            manifest = self.state_store.update_manifest(
+            enrolled_at = _now()
+            return self.state_store.update_manifest(
                 plan.transaction_id,
                 state="PENDING_BOOT_TEST",
-                enrolled_at=approved_at,
+                enrolled_at=enrolled_at,
                 boot_id_at_enroll=_read_boot_id(),
             )
-            self.state_store.write_approved_state(
-                ApprovedState(
-                    policy_name=self.policy.policy_name,
-                    bank=self.policy.tpm.bank,
-                    pcrs=self.policy.tpm.pcrs,
-                    values=after_pcrs,
-                ),
-                transaction_id=plan.transaction_id,
-                approved_at=approved_at,
-            )
-            return manifest
         except KeyboardInterrupt as exc:
             interruption = EnrollmentInterrupted("interrupted during final enrollment verification")
             self._mark_failure(plan.transaction_id, "FAILED_VERIFICATION", interruption)
@@ -351,6 +453,15 @@ class EnrollmentService:
         assert plan.header_backup_dir is not None
         backup_dir = Path(plan.header_backup_dir)
         for volume in self.policy.volumes:
+            manifest = self.state_store.load_manifest(plan.transaction_id)
+            recorded = manifest["volumes"][volume.name].get("header_backup")
+            if recorded:
+                backup_path = Path(recorded)
+                if not backup_path.exists():
+                    raise EnrollmentError(
+                        f"recorded LUKS header backup is missing: {backup_path}"
+                    )
+                continue
             backup_path = backup_dir / f"{plan.transaction_id}-{volume.uuid}.luks-header"
             if backup_path.exists():
                 raise EnrollmentError(f"refusing to overwrite existing header backup: {backup_path}")

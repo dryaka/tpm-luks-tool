@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .models import ApprovedState
+from .models import PCRState
 
 
 class StateError(RuntimeError):
@@ -17,7 +17,17 @@ class StateError(RuntimeError):
 
 _TRANSACTION_ID = re.compile(r"^[A-Za-z0-9._:+-]+$")
 _EVIDENCE_NAME = re.compile(r"^[A-Za-z0-9._-]+$")
-_ACTIVE_STATES = {"PREPARING", "PENDING_BOOT_TEST", "CLEANING", "FAILED_CLEANUP"}
+_ALWAYS_ACTIVE_STATES = {
+    "PREPARING",
+    "PENDING_BOOT_TEST",
+    "CLEANING",
+    "FAILED_CLEANUP",
+    "PREPARING_APPROVAL",
+    "APPROVED_PENDING_ENROLLMENT",
+    "ENROLLING",
+}
+_V2_FAILED_ACTIVE_STATES = {"FAILED_ENROLLMENT", "FAILED_VERIFICATION"}
+_LEGACY_DESIRED_STATES = {"PENDING_BOOT_TEST", "CLEANING", "FAILED_CLEANUP"}
 
 
 class StateStore:
@@ -32,47 +42,119 @@ class StateStore:
     def history_path(self) -> Path:
         return self.root / "history"
 
-    def load_approved_state(self) -> ApprovedState | None:
+    def load_policy_states(self) -> tuple[PCRState | None, PCRState | None]:
         if not self.state_path.exists():
-            return None
+            return None, None
         data = self._load_json(self.state_path)
-        try:
-            policy_name = data["policy_name"]
-            bank = data["bank"]
-            raw_pcrs = data["pcrs"]
-            raw_values = data["values"]
-        except KeyError as exc:
-            raise StateError(f"state file missing field: {exc.args[0]}") from exc
-        if not isinstance(policy_name, str) or not isinstance(bank, str):
-            raise StateError("state policy_name and bank must be strings")
-        if not isinstance(raw_pcrs, list) or any(type(item) is not int for item in raw_pcrs):
-            raise StateError("state pcrs must be an integer array")
-        if not isinstance(raw_values, dict):
-            raise StateError("state values must be an object")
-        values: dict[int, str] = {}
-        for pcr in raw_pcrs:
-            value = raw_values.get(str(pcr))
-            if not isinstance(value, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", value):
-                raise StateError(f"state value for PCR {pcr} must be a SHA-256 hex digest")
-            values[pcr] = value.lower()
-        return ApprovedState(policy_name=policy_name, bank=bank, pcrs=tuple(sorted(raw_pcrs)), values=values)
 
-    def write_approved_state(
+        if data.get("version") == 2 or "operational" in data or "desired" in data:
+            operational = self._parse_optional_state(data.get("operational"), "operational")
+            desired = self._parse_optional_state(data.get("desired"), "desired")
+            return operational, desired
+
+        # Compatibility with the <=0.3 flat "approved state". During an active
+        # legacy post-enrollment transaction that flat state is the desired
+        # target. Otherwise it represents the last operational baseline.
+        legacy = self._parse_state(data, "state")
+        active = self._find_active_transaction_raw()
+        if active is not None and active.get("state") in _LEGACY_DESIRED_STATES:
+            raw_new = active.get("new_values")
+            policy = active.get("policy")
+            if (
+                isinstance(raw_new, dict)
+                and isinstance(policy, dict)
+                and policy.get("name") == legacy.policy_name
+                and policy.get("bank") == legacy.bank
+                and tuple(sorted(policy.get("pcrs", []))) == legacy.pcrs
+                and all(raw_new.get(str(pcr), "").lower() == legacy.values[pcr] for pcr in legacy.pcrs)
+            ):
+                return self._legacy_operational_state(active, legacy), legacy
+        return legacy, None
+
+    def load_operational_state(self) -> PCRState | None:
+        return self.load_policy_states()[0]
+
+    def load_desired_state(self) -> PCRState | None:
+        return self.load_policy_states()[1]
+
+    def write_desired_state(
         self,
-        state: ApprovedState,
+        state: PCRState,
         *,
         transaction_id: str,
         approved_at: str,
     ) -> None:
-        payload = {
-            "policy_name": state.policy_name,
-            "bank": state.bank,
-            "pcrs": list(state.pcrs),
-            "values": {str(pcr): value for pcr, value in sorted(state.values.items())},
-            "approved_by_transaction": transaction_id,
-            "approved_at": approved_at,
-        }
-        self._write_json(self.state_path, payload)
+        operational, _ = self.load_policy_states()
+        self._write_state_document(
+            operational,
+            state,
+            operational_meta=None,
+            desired_meta={
+                "approved_by_transaction": transaction_id,
+                "approved_at": approved_at,
+            },
+        )
+
+    def write_operational_state(
+        self,
+        state: PCRState,
+        *,
+        transaction_id: str,
+        established_at: str,
+    ) -> None:
+        _, desired = self.load_policy_states()
+        self._write_state_document(
+            state,
+            desired,
+            operational_meta={
+                "established_by_transaction": transaction_id,
+                "established_at": established_at,
+            },
+            desired_meta=None,
+        )
+
+    def promote_desired_to_operational(
+        self,
+        *,
+        transaction_id: str,
+        established_at: str,
+    ) -> PCRState:
+        _, desired = self.load_policy_states()
+        if desired is None:
+            raise StateError("no desired PCR state is available to promote")
+        self._write_state_document(
+            desired,
+            None,
+            operational_meta={
+                "established_by_transaction": transaction_id,
+                "established_at": established_at,
+            },
+            desired_meta=None,
+        )
+        return desired
+
+    def clear_desired_state(self) -> None:
+        operational, _ = self.load_policy_states()
+        self._write_state_document(operational, None)
+
+    # Compatibility API for <=0.3 callers. "Approved" means the desired state
+    # when one exists, otherwise the operational baseline.
+    def load_approved_state(self) -> PCRState | None:
+        operational, desired = self.load_policy_states()
+        return desired or operational
+
+    def write_approved_state(
+        self,
+        state: PCRState,
+        *,
+        transaction_id: str,
+        approved_at: str,
+    ) -> None:
+        self.write_desired_state(
+            state,
+            transaction_id=transaction_id,
+            approved_at=approved_at,
+        )
 
     def create_transaction(self, manifest: dict[str, Any]) -> str:
         self._ensure_private_dir(self.history_path)
@@ -117,9 +199,10 @@ class StateStore:
         return manifests
 
     def find_active_transaction(self) -> dict[str, Any] | None:
-        active = [item for item in self.list_history() if item.get("state") in _ACTIVE_STATES]
+        active = [item for item in self.list_history() if self._is_active(item)]
         if len(active) > 1:
-            raise StateError("multiple active transactions found; manual repair is required")
+            ids = ", ".join(str(item.get("id", "?")) for item in active)
+            raise StateError(f"multiple active transactions found ({ids}); manual repair is required")
         return active[0] if active else None
 
     def load_manifest(self, transaction_id: str) -> dict[str, Any]:
@@ -128,6 +211,113 @@ class StateStore:
         if not path.exists():
             raise StateError(f"transaction not found: {transaction_id}")
         return self._load_json(path)
+
+    def _find_active_transaction_raw(self) -> dict[str, Any] | None:
+        active = [item for item in self.list_history() if self._is_active(item)]
+        return active[0] if len(active) == 1 else None
+
+    @staticmethod
+    def _is_active(item: dict[str, Any]) -> bool:
+        state = item.get("state")
+        if state in _ALWAYS_ACTIVE_STATES:
+            return True
+        if state in _V2_FAILED_ACTIVE_STATES and item.get("workflow_version") == 2:
+            return True
+        return False
+
+    @staticmethod
+    def _legacy_operational_state(
+        manifest: dict[str, Any],
+        desired: PCRState,
+    ) -> PCRState | None:
+        raw_old = manifest.get("old_values")
+        if not isinstance(raw_old, dict) or not raw_old:
+            return None
+        try:
+            values = {
+                int(raw_pcr): str(value).lower()
+                for raw_pcr, value in raw_old.items()
+            }
+        except (TypeError, ValueError):
+            return None
+        if tuple(sorted(values)) != desired.pcrs:
+            return None
+        if any(not re.fullmatch(r"[0-9a-f]{64}", value) for value in values.values()):
+            return None
+        return PCRState(
+            policy_name=desired.policy_name,
+            bank=desired.bank,
+            pcrs=desired.pcrs,
+            values=values,
+        )
+
+    @classmethod
+    def _parse_optional_state(cls, raw: Any, label: str) -> PCRState | None:
+        if raw is None:
+            return None
+        if not isinstance(raw, dict):
+            raise StateError(f"{label} state must be an object or null")
+        return cls._parse_state(raw, label)
+
+    @staticmethod
+    def _parse_state(data: dict[str, Any], label: str) -> PCRState:
+        try:
+            policy_name = data["policy_name"]
+            bank = data["bank"]
+            raw_pcrs = data["pcrs"]
+            raw_values = data["values"]
+        except KeyError as exc:
+            raise StateError(f"{label} state missing field: {exc.args[0]}") from exc
+        if not isinstance(policy_name, str) or not isinstance(bank, str):
+            raise StateError(f"{label} state policy_name and bank must be strings")
+        if not isinstance(raw_pcrs, list) or any(type(item) is not int for item in raw_pcrs):
+            raise StateError(f"{label} state pcrs must be an integer array")
+        if not isinstance(raw_values, dict):
+            raise StateError(f"{label} state values must be an object")
+        values: dict[int, str] = {}
+        for pcr in raw_pcrs:
+            value = raw_values.get(str(pcr))
+            if not isinstance(value, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", value):
+                raise StateError(f"{label} state value for PCR {pcr} must be a SHA-256 hex digest")
+            values[pcr] = value.lower()
+        return PCRState(
+            policy_name=policy_name,
+            bank=bank,
+            pcrs=tuple(sorted(raw_pcrs)),
+            values=values,
+        )
+
+    def _write_state_document(
+        self,
+        operational: PCRState | None,
+        desired: PCRState | None,
+        *,
+        operational_meta: dict[str, Any] | None = None,
+        desired_meta: dict[str, Any] | None = None,
+    ) -> None:
+        payload: dict[str, Any] = {
+            "version": 2,
+            "operational": self._state_to_dict(operational, operational_meta),
+            "desired": self._state_to_dict(desired, desired_meta),
+        }
+        self._write_json(self.state_path, payload)
+
+    @staticmethod
+    def _state_to_dict(
+        state: PCRState | None,
+        metadata: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        if state is None:
+            return None
+        result: dict[str, Any] = {
+            "policy_name": state.policy_name,
+            "bank": state.bank,
+            "pcrs": list(state.pcrs),
+            "values": {str(pcr): value for pcr, value in sorted(state.values.items())},
+        }
+        if metadata:
+            result.update(metadata)
+        return result
 
     def _next_transaction_id(self) -> str:
         base = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")

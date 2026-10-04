@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -231,6 +232,9 @@ class CleanupTests(unittest.TestCase):
 
             manifest = service.execute(plan)
             self.assertEqual(manifest["state"], "COMPLETE")
+            operational, desired = store.load_policy_states()
+            self.assertEqual(operational.values[7], PCR)
+            self.assertIsNone(desired)
 
             for volume in policy.volumes:
                 metadata = reader.read(volume)
@@ -251,6 +255,38 @@ class CleanupTests(unittest.TestCase):
             self.assertEqual(len(kill_calls), 2)
             self.assertEqual(len(remove_calls), 2)
             self.assertTrue(all("--batch-mode" in call for call in kill_calls + remove_calls))
+
+    def test_legacy_flat_pending_state_can_complete_and_migrate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            policy, store, reader, runner, txid, _ = self._setup_pending(directory)
+            store.state_path.write_text(
+                json.dumps(
+                    {
+                        "policy_name": "test",
+                        "bank": "sha256",
+                        "pcrs": [7],
+                        "values": {"7": PCR},
+                        "approved_by_transaction": txid,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            service = CleanupService(
+                policy,
+                runner,
+                FakePCRReader(),
+                reader,
+                store,
+                boot_id_path=Path(directory) / "missing-boot-id",
+            )
+
+            plan = service.prepare()
+            self.assertEqual(plan.target_source, "desired")
+            service.execute(plan)
+
+            operational, desired = store.load_policy_states()
+            self.assertEqual(operational.values[7], PCR)
+            self.assertIsNone(desired)
 
     def test_same_boot_is_rejected_before_cleanup(self):
         with tempfile.TemporaryDirectory() as directory:

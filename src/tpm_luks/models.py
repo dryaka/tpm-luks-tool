@@ -55,11 +55,15 @@ class Policy:
 
 
 @dataclass(frozen=True)
-class ApprovedState:
+class PCRState:
     policy_name: str
     bank: str
     pcrs: tuple[int, ...]
     values: dict[int, str]
+
+
+# Compatibility name for manifests/tests produced by versions <= 0.3.
+ApprovedState = PCRState
 
 
 @dataclass(frozen=True)
@@ -86,16 +90,19 @@ class VolumeMetadata:
 @dataclass(frozen=True)
 class PCRComparison:
     pcr: int
-    approved: str | None
+    operational: str | None
+    desired: str | None
     current: str
-    matches: bool | None
+    matches_operational: bool | None
+    matches_desired: bool | None
 
 
 @dataclass(frozen=True)
 class SystemSnapshot:
     policy: Policy
     current_pcrs: dict[int, str]
-    approved_state: ApprovedState | None
+    operational_state: PCRState | None
+    desired_state: PCRState | None
     drift_state: DriftState
     pcr_comparisons: tuple[PCRComparison, ...]
     volumes: tuple[VolumeMetadata, ...]

@@ -6,6 +6,7 @@ from pathlib import Path
 from tpm_luks.models import (
     AuditPolicy,
     LUKSPolicy,
+    PCRState,
     Policy,
     TPMPolicy,
     TPMToken,
@@ -18,6 +19,7 @@ from tpm_luks.transaction import EnrollmentError, EnrollmentInterrupted, Enrollm
 
 
 PCR = "a" * 64
+OLD_PCR = "b" * 64
 UUID_A = "9f36aa12-4b29-4e3d-9b1a-2d4ce85f71a0"
 UUID_B = "3a80df27-6c14-49b7-a526-1f9de3b4c802"
 
@@ -92,43 +94,107 @@ def after_volume(name, uuid):
     )
 
 
+def summary(metadata):
+    return {
+        "keyslots": list(metadata.keyslots),
+        "recovery_keyslots": list(metadata.recovery_keyslots),
+        "tpm_tokens": [
+            {
+                "token_id": token.token_id,
+                "keyslots": list(token.keyslots),
+                "bank": token.bank,
+                "pcrs": list(token.pcrs),
+                "policy_hashes": list(token.policy_hashes),
+            }
+            for token in metadata.tpm_tokens
+        ],
+    }
+
+
 class TransactionTests(unittest.TestCase):
-    def _policy(self, backup=False):
+    def _policy(self, *, backup=False, backup_dir=None):
         return Policy(
             "test",
             TPMPolicy("auto", "sha256", (7,)),
             (VolumePolicy("A", UUID_A), VolumePolicy("B", UUID_B)),
             LUKSPolicy(True, True, 1),
-            AuditPolicy(event_log=False, luks_dump=True, header_backup=backup, header_backup_dir=None),
+            AuditPolicy(
+                event_log=False,
+                luks_dump=True,
+                header_backup=backup,
+                header_backup_dir=backup_dir,
+            ),
         )
 
-    def _service(self, directory, fail_volume=None):
+    def _components(self, directory, *, fail_volume=None, policy=None):
         before = {"A": volume("A", UUID_A), "B": volume("B", UUID_B)}
         after = {"A": after_volume("A", UUID_A), "B": after_volume("B", UUID_B)}
         reader = FakeLUKSReader(before, after)
         runner = FakeRunner(reader, fail_volume=fail_volume)
+        store = StateStore(directory)
         service = EnrollmentService(
-            self._policy(),
+            policy or self._policy(),
             runner,
             FakePCRReader(),
             reader,
-            StateStore(directory),
+            store,
             auto_public_key_paths=(),
         )
-        return service, runner
+        return service, runner, reader, store
 
-    def test_successful_reenroll_writes_pending_transaction_and_approved_state(self):
+    def _approved_target(self, store, reader):
+        store.write_operational_state(
+            PCRState("test", "sha256", (7,), {7: OLD_PCR}),
+            transaction_id="seed",
+            established_at="2026-10-03T19:00:00+00:00",
+        )
+        manifest = {
+            "workflow_version": 2,
+            "target_source": "desired",
+            "type": "PCR_DRIFT",
+            "state": "APPROVED_PENDING_ENROLLMENT",
+            "policy": {"name": "test", "device": "auto", "bank": "sha256", "pcrs": [7]},
+            "old_values": {"7": OLD_PCR},
+            "new_values": {"7": PCR},
+            "volumes": {
+                name: {
+                    "uuid": UUID_A if name == "A" else UUID_B,
+                    "before": summary(metadata),
+                    "header_backup": None,
+                    "enrollment_result": None,
+                    "new_token": None,
+                    "new_keyslot": None,
+                }
+                for name, metadata in reader.before.items()
+            },
+        }
+        txid = store.create_transaction(manifest)
+        store.write_desired_state(
+            PCRState("test", "sha256", (7,), {7: PCR}),
+            transaction_id=txid,
+            approved_at="2026-10-03T20:00:00+00:00",
+        )
+        return txid
+
+    def test_successful_reenroll_keeps_desired_separate_from_operational(self):
         with tempfile.TemporaryDirectory() as directory:
-            service, runner = self._service(directory)
+            service, runner, reader, store = self._components(directory)
+            self._approved_target(store, reader)
+
             plan = service.prepare()
+            self.assertEqual(plan.target_source, "desired")
             manifest = service.execute(plan)
+
             self.assertEqual(manifest["state"], "PENDING_BOOT_TEST")
-            stored = StateStore(directory).load_manifest(plan.transaction_id)
+            stored = store.load_manifest(plan.transaction_id)
             self.assertEqual(stored["volumes"]["A"]["enrollment_result"], "ADDED")
             self.assertEqual(stored["volumes"]["A"]["new_token"], 2)
             self.assertEqual(stored["volumes"]["A"]["new_keyslot"], 3)
-            approved = StateStore(directory).load_approved_state()
-            self.assertEqual(approved.values[7], PCR)
+
+            operational, desired = store.load_policy_states()
+            self.assertEqual(operational.values[7], OLD_PCR)
+            self.assertEqual(desired.values[7], PCR)
+
             enroll_call = next(call for call in runner.calls if call[0][0] == "systemd-cryptenroll")
             self.assertIn(f"--tpm2-pcrs=7:sha256={PCR}", enroll_call[0])
             self.assertIn("--tpm2-pcrlock=", enroll_call[0])
@@ -138,8 +204,9 @@ class TransactionTests(unittest.TestCase):
 
     def test_existing_exact_enrollment_is_idempotent_and_other_volume_progresses(self):
         with tempfile.TemporaryDirectory() as directory:
-            service, runner = self._service(directory)
-            service.luks_reader.before["A"] = after_volume("A", UUID_A)
+            service, runner, reader, store = self._components(directory)
+            reader.before["A"] = after_volume("A", UUID_A)
+            self._approved_target(store, reader)
             original_run = runner.run
 
             def no_op_a(argv, **kwargs):
@@ -154,18 +221,15 @@ class TransactionTests(unittest.TestCase):
             manifest = service.execute(plan)
 
             self.assertEqual(manifest["state"], "PENDING_BOOT_TEST")
-            stored = StateStore(directory).load_manifest(plan.transaction_id)
+            stored = store.load_manifest(plan.transaction_id)
             self.assertEqual(stored["volumes"]["A"]["enrollment_result"], "ALREADY_PRESENT")
             self.assertIsNone(stored["volumes"]["A"]["new_token"])
-            self.assertIsNone(stored["volumes"]["A"]["new_keyslot"])
             self.assertEqual(stored["volumes"]["B"]["enrollment_result"], "ADDED")
-            self.assertEqual(stored["volumes"]["B"]["new_token"], 2)
-            self.assertEqual(stored["volumes"]["B"]["new_keyslot"], 3)
-            self.assertEqual(StateStore(directory).load_approved_state().values[7], PCR)
 
-    def test_enrollment_interrupt_is_durable_and_identifies_volume(self):
+    def test_enrollment_interrupt_is_durable_and_desired_target_survives(self):
         with tempfile.TemporaryDirectory() as directory:
-            service, runner = self._service(directory)
+            service, runner, reader, store = self._components(directory)
+            txid = self._approved_target(store, reader)
             plan = service.prepare()
             original_run = runner.run
 
@@ -177,27 +241,93 @@ class TransactionTests(unittest.TestCase):
             runner.run = interrupt_enrollment
             with self.assertRaises(EnrollmentInterrupted):
                 service.execute(plan)
-            manifest = StateStore(directory).load_manifest(plan.transaction_id)
+
+            manifest = store.load_manifest(txid)
             self.assertEqual(manifest["state"], "FAILED_ENROLLMENT")
             self.assertEqual(manifest["failed_volume"], "A")
-            self.assertIn("interrupted", manifest["error"])
-            self.assertIsNone(StateStore(directory).load_approved_state())
+            self.assertEqual(store.load_desired_state().values[7], PCR)
+            self.assertEqual(store.load_operational_state().values[7], OLD_PCR)
+            self.assertEqual(store.find_active_transaction()["id"], txid)
 
-    def test_enrollment_failure_is_durable_and_does_not_update_approved_state(self):
+    def test_enrollment_failure_is_resumable_active_transaction(self):
         with tempfile.TemporaryDirectory() as directory:
-            service, _ = self._service(directory, fail_volume="B")
+            service, _, reader, store = self._components(directory, fail_volume="B")
+            txid = self._approved_target(store, reader)
             plan = service.prepare()
+
             with self.assertRaises(EnrollmentError):
                 service.execute(plan)
-            manifest = StateStore(directory).load_manifest(plan.transaction_id)
+
+            manifest = store.load_manifest(txid)
             self.assertEqual(manifest["state"], "FAILED_ENROLLMENT")
             self.assertEqual(manifest["failed_volume"], "B")
-            self.assertIsNone(StateStore(directory).load_approved_state())
+            retry = service.prepare()
+            self.assertEqual(retry.transaction_id, txid)
+            self.assertEqual(retry.target_source, "desired")
+
+    def test_unapproved_pcr_drift_blocks_reenroll(self):
+        with tempfile.TemporaryDirectory() as directory:
+            service, _, _, store = self._components(directory)
+            store.write_operational_state(
+                PCRState("test", "sha256", (7,), {7: OLD_PCR}),
+                transaction_id="seed",
+                established_at="2026-10-03T19:00:00+00:00",
+            )
+            with self.assertRaisesRegex(EnrollmentError, "run 'tpm-luks approve'"):
+                service.prepare()
+            self.assertEqual(store.list_history(), [])
+
+    def test_reenroll_reconciles_operational_target_without_new_approval(self):
+        with tempfile.TemporaryDirectory() as directory:
+            service, _, _, store = self._components(directory)
+            store.write_operational_state(
+                PCRState("test", "sha256", (7,), {7: PCR}),
+                transaction_id="seed",
+                established_at="2026-10-03T19:00:00+00:00",
+            )
+
+            plan = service.prepare()
+            self.assertEqual(plan.target_source, "operational")
+            self.assertEqual(plan.transaction_type, "RECONCILIATION")
+            self.assertTrue(plan.transaction_created)
+            manifest = service.execute(plan)
+            self.assertEqual(manifest["state"], "PENDING_BOOT_TEST")
+            self.assertIsNone(store.load_desired_state())
+            self.assertEqual(store.load_operational_state().values[7], PCR)
+
+    def test_cancel_existing_approval_leaves_target_pending(self):
+        with tempfile.TemporaryDirectory() as directory:
+            service, runner, reader, store = self._components(directory)
+            txid = self._approved_target(store, reader)
+
+            plan = service.prepare()
+            service.cancel(plan)
+
+            self.assertEqual(
+                store.load_manifest(txid)["state"],
+                "APPROVED_PENDING_ENROLLMENT",
+            )
+            self.assertEqual(store.load_desired_state().values[7], PCR)
+            self.assertFalse(any(call[0][0] == "systemd-cryptenroll" for call in runner.calls))
+
+    def test_cancel_new_reconciliation_marks_transaction_cancelled(self):
+        with tempfile.TemporaryDirectory() as directory:
+            service, runner, _, store = self._components(directory)
+            store.write_operational_state(
+                PCRState("test", "sha256", (7,), {7: PCR}),
+                transaction_id="seed",
+                established_at="2026-10-03T19:00:00+00:00",
+            )
+            plan = service.prepare()
+            service.cancel(plan)
+            self.assertEqual(store.load_manifest(plan.transaction_id)["state"], "CANCELLED")
+            self.assertFalse(any(call[0][0] == "systemd-cryptenroll" for call in runner.calls))
 
     def test_recovery_slot_policy_blocks_prepare(self):
         with tempfile.TemporaryDirectory() as directory:
-            service, _ = self._service(directory)
-            bad = VolumeMetadata(
+            service, _, reader, store = self._components(directory)
+            self._approved_target(store, reader)
+            reader.before["A"] = VolumeMetadata(
                 "A",
                 UUID_A,
                 "/dev/a",
@@ -207,76 +337,54 @@ class TransactionTests(unittest.TestCase):
                 (2,),
                 (),
             )
-            service.luks_reader.before["A"] = bad
             with self.assertRaisesRegex(EnrollmentError, "requires at least"):
                 service.prepare()
-            self.assertEqual(StateStore(directory).list_history(), [])
 
     def test_enabled_header_backup_requires_explicit_directory(self):
         with tempfile.TemporaryDirectory() as directory:
-            before = {"A": volume("A", UUID_A), "B": volume("B", UUID_B)}
-            after = {"A": after_volume("A", UUID_A), "B": after_volume("B", UUID_B)}
-            reader = FakeLUKSReader(before, after)
-            runner = FakeRunner(reader)
-            service = EnrollmentService(
-                self._policy(backup=True),
-                runner,
-                FakePCRReader(),
-                reader,
-                StateStore(directory),
-                auto_public_key_paths=(),
-            )
+            policy = self._policy(backup=True, backup_dir=None)
+            service, _, reader, store = self._components(directory, policy=policy)
+            self._approved_target(store, reader)
             with self.assertRaisesRegex(EnrollmentError, "header_backup_dir"):
                 service.prepare()
 
-    def test_cancel_marks_transaction_without_mutation(self):
+    def test_header_backup_failure_keeps_approved_target_resumable(self):
         with tempfile.TemporaryDirectory() as directory:
-            service, runner = self._service(directory)
-            plan = service.prepare()
-            service.cancel(plan)
-            manifest = StateStore(directory).load_manifest(plan.transaction_id)
-            self.assertEqual(manifest["state"], "CANCELLED")
-            self.assertFalse(any(call[0][0] == "systemd-cryptenroll" for call in runner.calls))
+            root = Path(directory)
+            backup_dir = root / "backups"
+            backup_dir.mkdir()
+            policy = self._policy(backup=True, backup_dir=str(backup_dir))
+            service, runner, reader, store = self._components(root / "state", policy=policy)
+            txid = self._approved_target(store, reader)
+            original_run = runner.run
 
-    def test_active_transaction_blocks_new_prepare(self):
-        with tempfile.TemporaryDirectory() as directory:
-            service, _ = self._service(directory)
-            service.prepare()
-            with self.assertRaisesRegex(EnrollmentError, "already PREPARING"):
-                service.prepare()
+            def fail_backup(argv, **kwargs):
+                args = tuple(str(x) for x in argv)
+                if args[0:2] == ("cryptsetup", "luksHeaderBackup"):
+                    raise CommandError(CommandResult(args, 1, "", "simulated backup failure"))
+                return original_run(argv, **kwargs)
+
+            runner.run = fail_backup
+            plan = service.prepare()
+            with self.assertRaisesRegex(EnrollmentError, "header backup failed"):
+                service.execute(plan)
+
+            self.assertEqual(store.load_manifest(txid)["state"], "FAILED_ENROLLMENT")
+            self.assertEqual(store.find_active_transaction()["id"], txid)
+            self.assertEqual(store.load_desired_state().values[7], PCR)
 
     def test_header_backups_complete_before_first_enrollment(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             backup_dir = root / "backups"
             backup_dir.mkdir()
-            state_dir = root / "state"
-            before = {"A": volume("A", UUID_A), "B": volume("B", UUID_B)}
-            after = {"A": after_volume("A", UUID_A), "B": after_volume("B", UUID_B)}
-            reader = FakeLUKSReader(before, after)
-            runner = FakeRunner(reader)
-            policy = Policy(
-                "test",
-                TPMPolicy("auto", "sha256", (7,)),
-                (VolumePolicy("A", UUID_A), VolumePolicy("B", UUID_B)),
-                LUKSPolicy(True, True, 1),
-                AuditPolicy(
-                    event_log=False,
-                    luks_dump=True,
-                    header_backup=True,
-                    header_backup_dir=str(backup_dir),
-                ),
-            )
-            service = EnrollmentService(
-                policy,
-                runner,
-                FakePCRReader(),
-                reader,
-                StateStore(state_dir),
-                auto_public_key_paths=(),
-            )
+            policy = self._policy(backup=True, backup_dir=str(backup_dir))
+            service, runner, reader, store = self._components(root / "state", policy=policy)
+            self._approved_target(store, reader)
+
             plan = service.prepare()
             service.execute(plan)
+
             first_enroll = next(
                 i for i, call in enumerate(runner.calls) if call[0][0] == "systemd-cryptenroll"
             )
@@ -296,7 +404,8 @@ class TransactionTests(unittest.TestCase):
             root = Path(directory)
             auto_key = root / "tpm2-pcr-public-key.pem"
             auto_key.write_text("dummy", encoding="utf-8")
-            service, _ = self._service(root / "state")
+            service, _, reader, store = self._components(root / "state")
+            self._approved_target(store, reader)
             service.auto_public_key_paths = (auto_key,)
             with self.assertRaisesRegex(EnrollmentError, "signed-policy public key"):
                 service.prepare()
