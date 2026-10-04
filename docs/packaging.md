@@ -35,7 +35,7 @@ Conceptually:
 /usr/lib/python3*/.../tpm_luks/          # distro-specific Python module path
 /etc/tpm-luks.toml                       # package-managed administrator policy
 /usr/share/doc/tpm-luks-tool/            # README and architecture/packaging docs
-/var/lib/tpm-luks/                       # runtime-created state; not package-owned
+/var/lib/tpm-luks/                       # install-created runtime state; not package-owned
 ```
 
 The packaged `/etc/tpm-luks.toml` is the safe example policy from
@@ -44,6 +44,11 @@ be replaced before mutating commands are used.
 
 The package never installs secrets, passphrases, private keys, production TPM
 metadata, or LUKS header backups.
+
+Installation ships a `systemd-tmpfiles` definition that creates
+`/var/lib/tpm-luks` and `/var/lib/tpm-luks/history` as `root:root` mode
+`0700`. The directories themselves are not package payload files, so package
+removal does not remove runtime state or audit history.
 
 ## Runtime dependencies
 
@@ -199,8 +204,8 @@ The build helpers fail early when these values differ.
 Native package revisions are independent of the upstream application version:
 
 ```text
-RPM: 0.4.0-1
-DEB: 0.4.0-1
+RPM: 0.4.0-2
+DEB: 0.4.0-2
 ```
 
 A packaging-only change can increment the native release/revision while keeping
