@@ -76,8 +76,10 @@ class FormattingTests(unittest.TestCase):
         self.assertIn(f"    Current:           {current}", output)
         self.assertIn("    Operational match: CHANGED", output)
         self.assertIn("    Desired match:     MATCH", output)
-        self.assertIn("    token 0: keyslot=1 bank=sha256 pcrs=7", output)
-        self.assertIn(f"      policy hash: {policy_hash}", output)
+        self.assertIn(
+            f"    token 0: keyslot=1 bank=sha256 pcrs=7 policy={policy_hash}",
+            output,
+        )
         self.assertNotIn("...", output)
         self.assertIn("APPROVED_PENDING_ENROLLMENT", output)
 
