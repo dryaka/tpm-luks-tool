@@ -5,9 +5,11 @@ import json
 import os
 import sys
 
+from .approval import ApprovalError, ApprovalInterrupted, ApprovalService
 from .cleanup import CleanupError, CleanupInterrupted, CleanupService
 from .config import PolicyError, load_policy
 from .formatting import (
+    format_approval_plan,
     format_check_json,
     format_cleanup_plan,
     format_enrollment_plan,
@@ -28,11 +30,12 @@ EXIT_DRIFT = 2
 EXIT_UNINITIALIZED = 3
 EXIT_POLICY_CHANGE = 4
 
-_COMMANDS = {"status", "check", "history", "show", "reenroll", "cleanup"}
+_COMMANDS = {"status", "check", "history", "show", "approve", "reenroll", "cleanup"}
 _VALUE_OPTIONS = {"--config", "--state-dir"}
 _HELP_OPTIONS = {"-h", "--help"}
 _COMMAND_FLAGS = {
-    "reenroll": {"--yes", "--force"},
+    "approve": {"--yes"},
+    "reenroll": {"--yes"},
     "cleanup": {"--yes"},
 }
 
@@ -141,8 +144,8 @@ def build_parser() -> argparse.ArgumentParser:
         "status",
         help="show human-readable current state",
         description=(
-            "Inspect the configured PCR policy, compare current PCR values with the approved "
-            "state, and show LUKS2 keyslots and systemd-tpm2 token associations."
+            "Inspect the configured PCR policy, compare current PCR values with the operational "
+            "baseline and desired target, and show LUKS2 keyslots and systemd-tpm2 associations."
         ),
         epilog=(
             "Example:\n"
@@ -163,11 +166,11 @@ def build_parser() -> argparse.ArgumentParser:
         ),
         epilog=(
             "Exit codes:\n"
-            "  0  current PCR policy matches approved state\n"
+            "  0  current PCR state matches operational baseline\n"
             "  1  configuration, command, metadata, or runtime error\n"
-            "  2  PCR drift detected\n"
-            "  3  no approved state exists\n"
-            "  4  configured policy differs from approved policy\n"
+            "  2  PCR drift from operational baseline\n"
+            "  3  no operational baseline exists\n"
+            "  4  configured policy differs from operational baseline\n"
             "\nExample:\n"
             "  sudo tpm-luks check --config ./test-policy.toml "
             "--state-dir /tmp/tpm-luks-test-state"
@@ -177,14 +180,37 @@ def build_parser() -> argparse.ArgumentParser:
     _add_config_option(check, suppress_default=True)
     _add_state_option(check, suppress_default=True)
 
+    approve = sub.add_parser(
+        "approve",
+        help="approve the current PCR state as the desired target",
+        description=(
+            "Record an explicit trust decision for the currently observed PCR values. "
+            "This command does not modify LUKS metadata; reenroll performs the subsequent "
+            "volume reconciliation."
+        ),
+        epilog=(
+            "Approval is required when current PCR values differ from the operational baseline.\n\n"
+            "Example:\n"
+            "  sudo tpm-luks approve --config /etc/tpm-luks.toml"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    _add_config_option(approve, suppress_default=True)
+    _add_state_option(approve, suppress_default=True)
+    approve.add_argument(
+        "--yes",
+        action="store_true",
+        help="approve the current PCR values without interactive confirmation",
+    )
+
     reenroll = sub.add_parser(
         "reenroll",
         help="add and verify replacement TPM enrollments",
         description=(
-            "Create a safe re-enrollment transaction. The command captures evidence, validates "
-            "recovery access, optionally backs up every LUKS header, asks for confirmation, then "
-            "adds one new TPM enrollment per configured volume. Existing slots/tokens are never "
-            "removed by this command."
+            "Reconcile every configured volume to the already approved PCR target. "
+            "When PCR drift is awaiting approval, run 'approve' first. If there is no desired "
+            "target and the current PCR state matches the operational baseline, reenroll acts as "
+            "a repair/reconciliation operation."
         ),
         epilog=(
             "The command may prompt for an existing LUKS passphrase/recovery key for each volume.\n"
@@ -198,11 +224,6 @@ def build_parser() -> argparse.ArgumentParser:
     _add_config_option(reenroll, suppress_default=True)
     _add_state_option(reenroll, suppress_default=True)
     reenroll.add_argument("--yes", action="store_true", help="skip the interactive confirmation")
-    reenroll.add_argument(
-        "--force",
-        action="store_true",
-        help="allow re-enrollment even when current PCR state already matches approved state",
-    )
 
     cleanup = sub.add_parser(
         "cleanup",
@@ -275,6 +296,38 @@ def _print_history(store: StateStore) -> None:
         print(f"{transaction_id:<24} {tx_type:<19} {state}")
 
 
+def _run_approve(args: argparse.Namespace) -> int:
+    if os.geteuid() != 0:
+        raise ApprovalError("approve must run as root")
+    policy = load_policy(args.config)
+    runner = Runner()
+    store = StateStore(args.state_dir)
+    service = ApprovalService(
+        policy,
+        PCRReader(runner),
+        LUKSMetadataReader(runner),
+        store,
+    )
+    plan = service.prepare()
+    print(format_approval_plan(plan))
+    if not args.yes:
+        if not sys.stdin.isatty():
+            raise ApprovalError(
+                "interactive confirmation requires a TTY; use --yes to approve explicitly"
+            )
+        try:
+            answer = input("Approve current PCR values as the desired target? [y/N] ").strip().lower()
+        except KeyboardInterrupt as exc:
+            raise ApprovalInterrupted("interrupted before approval; no trust state changed") from exc
+        if answer not in {"y", "yes"}:
+            print("Approval cancelled; no trust state or LUKS metadata was changed.")
+            return EXIT_OK
+    manifest = service.execute(plan)
+    print(f"Transaction {manifest['id']}: {manifest['state']}")
+    print("Run 'tpm-luks reenroll' to reconcile configured volumes to the approved target.")
+    return EXIT_OK
+
+
 def _run_reenroll(args: argparse.Namespace) -> int:
     if os.geteuid() != 0:
         raise EnrollmentError("reenroll must run as root")
@@ -282,17 +335,17 @@ def _run_reenroll(args: argparse.Namespace) -> int:
     runner = Runner()
     store = StateStore(args.state_dir)
     service = EnrollmentService(policy, runner, PCRReader(runner), LUKSMetadataReader(runner), store)
-    plan = service.prepare(force=args.force)
+    plan = service.prepare()
     print(format_enrollment_plan(plan))
     if not args.yes:
         if not sys.stdin.isatty():
             service.cancel(plan)
-            raise EnrollmentError("interactive confirmation requires a TTY; use --yes to approve explicitly")
+            raise EnrollmentError("interactive confirmation requires a TTY; use --yes to confirm reconciliation")
         try:
-            answer = input("Proceed with additive TPM enrollment? [y/N] ").strip().lower()
+            answer = input("Proceed with TPM enrollment reconciliation? [y/N] ").strip().lower()
         except KeyboardInterrupt as exc:
             service.cancel(plan)
-            raise EnrollmentInterrupted("interrupted before enrollment; transaction cancelled") from exc
+            raise EnrollmentInterrupted("interrupted before enrollment; transaction unchanged") from exc
         if answer not in {"y", "yes"}:
             service.cancel(plan)
             print("Cancelled; no LUKS metadata was changed.")
@@ -352,6 +405,8 @@ def main(argv: list[str] | None = None) -> int:
             manifest = StateStore(args.state_dir).load_manifest(args.transaction_id)
             print(json.dumps(manifest, indent=2, sort_keys=True))
             return EXIT_OK
+        if args.command == "approve":
+            return _run_approve(args)
         if args.command == "reenroll":
             return _run_reenroll(args)
         if args.command == "cleanup":
@@ -364,13 +419,14 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "check":
             print(format_check_json(snapshot))
             return _drift_exit_code(snapshot.drift_state)
-    except (EnrollmentInterrupted, CleanupInterrupted) as exc:
+    except (ApprovalInterrupted, EnrollmentInterrupted, CleanupInterrupted) as exc:
         print(f"\ntpm-luks: {exc}", file=sys.stderr)
         return 130
     except KeyboardInterrupt:
         print("\ntpm-luks: interrupted", file=sys.stderr)
         return 130
     except (
+        ApprovalError,
         PolicyError,
         StateError,
         PCRReadError,

@@ -3,12 +3,13 @@ import io
 import unittest
 from unittest.mock import patch
 
+from tpm_luks.approval import ApprovalInterrupted
 from tpm_luks.cleanup import CleanupInterrupted
 from tpm_luks.cli import _normalize_command_flags, main
 from tpm_luks.transaction import EnrollmentInterrupted
 
 
-class Phase2CLITests(unittest.TestCase):
+class WorkflowCLITests(unittest.TestCase):
     def _help(self, argv):
         stream = io.StringIO()
         with contextlib.redirect_stdout(stream):
@@ -17,15 +18,24 @@ class Phase2CLITests(unittest.TestCase):
         self.assertEqual(exit_context.exception.code, 0)
         return stream.getvalue()
 
-    def test_reenroll_help_before_command(self):
+    def test_approve_help_before_command(self):
+        text = self._help(["--help", "approve"])
+        self.assertIn("usage: tpm-luks approve", text)
+        self.assertIn("--yes", text)
+
+    def test_approve_yes_flag_can_precede_command(self):
+        normalized = _normalize_command_flags(["--yes", "approve"])
+        self.assertEqual(normalized, ["approve", "--yes"])
+
+    def test_reenroll_help_has_no_force_override(self):
         text = self._help(["--help", "reenroll"])
         self.assertIn("usage: tpm-luks reenroll", text)
         self.assertIn("--yes", text)
-        self.assertIn("--force", text)
+        self.assertNotIn("--force", text)
 
-    def test_reenroll_flags_can_precede_command(self):
-        normalized = _normalize_command_flags(["--yes", "--force", "reenroll"])
-        self.assertEqual(normalized, ["reenroll", "--yes", "--force"])
+    def test_reenroll_yes_flag_can_precede_command(self):
+        normalized = _normalize_command_flags(["--yes", "reenroll"])
+        self.assertEqual(normalized, ["reenroll", "--yes"])
 
     def test_cleanup_help_before_command(self):
         text = self._help(["--help", "cleanup"])
@@ -35,6 +45,18 @@ class Phase2CLITests(unittest.TestCase):
     def test_cleanup_yes_flag_can_precede_command(self):
         normalized = _normalize_command_flags(["--yes", "cleanup"])
         self.assertEqual(normalized, ["cleanup", "--yes"])
+
+    def test_interrupted_approval_returns_130_without_traceback(self):
+        stderr = io.StringIO()
+        with patch(
+            "tpm_luks.cli._run_approve",
+            side_effect=ApprovalInterrupted("approval interrupted"),
+        ):
+            with contextlib.redirect_stderr(stderr):
+                rc = main(["approve"])
+        self.assertEqual(rc, 130)
+        self.assertIn("approval interrupted", stderr.getvalue())
+        self.assertNotIn("Traceback", stderr.getvalue())
 
     def test_interrupted_cleanup_returns_130_without_traceback(self):
         stderr = io.StringIO()

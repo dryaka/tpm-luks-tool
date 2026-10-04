@@ -17,7 +17,7 @@ The tool is deliberately conservative. It automates evidence collection, validat
   - One or more PCR indices.
 - One or more LUKS2 volumes.
 - Detection of PCR drift.
-- Comparison of the current measured state with the last approved state.
+- Comparison of the current measured state with the last operationally verified state.
 - TPM event-log capture and PCR-focused drift explanation.
 - TPM2 enrollment through `systemd-cryptenroll`.
 - Preservation of existing non-TPM recovery keyslots.
@@ -66,7 +66,7 @@ Cleanup is a separate operation after a successful boot with the new TPM policy.
 Before modifying a LUKS header, the tool must show:
 
 - active TPM policy,
-- current and approved PCR values,
+- current, operational, and desired PCR values,
 - affected volumes,
 - current TPM tokens and associated keyslots,
 - recovery keyslots,
@@ -92,6 +92,7 @@ Secrets, passphrases, raw LUKS keys, and TPM-unsealed key material must never be
                     |      tpm-luks CLI    |
                     |                      |
                     | status / check       |
+                    | approve              |
                     | reenroll / cleanup   |
                     | history / show       |
                     +-----+----------+-----+
@@ -200,27 +201,66 @@ The repository must never contain runtime state, LUKS headers, TPM blobs capture
 
 ## 7. Policy state
 
-The approved state should record at least:
+Trust approval and operational verification are distinct states.
+
+`state.json` stores two PCR targets:
+
+- **operational** — the last target that completed enrollment, reboot verification, and cleanup,
+- **desired** — an explicitly approved target that has not yet completed that lifecycle.
+
+Example:
 
 ```json
 {
-  "policy_name": "fedora-root",
-  "bank": "sha256",
-  "pcrs": [7],
-  "values": {
-    "7": "<approved-PCR-value>"
+  "version": 2,
+  "operational": {
+    "policy_name": "fedora-root",
+    "bank": "sha256",
+    "pcrs": [7],
+    "values": {
+      "7": "<operational-PCR-value>"
+    }
+  },
+  "desired": {
+    "policy_name": "fedora-root",
+    "bank": "sha256",
+    "pcrs": [7],
+    "values": {
+      "7": "<approved-next-PCR-value>"
+    }
   }
 }
 ```
 
-The tool must distinguish:
+The tool distinguishes:
 
-- **PCR drift** — configured PCR selection is unchanged, but one or more values differ.
-- **Policy change** — PCR bank or selected PCR set changes.
+- **PCR drift** — current values differ from the operational state while PCR selection is unchanged,
+- **policy change** — configured bank or PCR selection differs from the operational state,
+- **desired match** — current values match a separately approved desired target even though they still differ from operational.
 
-A policy change always requires explicit re-enrollment.
+Approval does not imply successful enrollment or successful boot. Consequently:
 
-In Phase 2, the operator's confirmed `reenroll` transaction is the trust-approval action. The approved PCR state is updated only after all configured volumes have received and passed verification of their new TPM enrollment and the selected PCR values are confirmed unchanged. The transaction then remains `PENDING_BOOT_TEST` until Phase 3 cleanup after a successful reboot.
+```text
+current drift
+   |
+   | approve
+   v
+desired target
+   |
+   | reenroll
+   v
+PENDING_BOOT_TEST
+   |
+   | reboot + cleanup
+   v
+operational target
+```
+
+Only successful cleanup promotes `desired` to `operational`.
+
+For reconciliation of a damaged/missing TPM enrollment when there is no PCR drift, `reenroll` may use the existing operational state as its target. This requires current PCR values to still match operational exactly and does not create a new trust decision.
+
+State files written by versions up to 0.3 used one flat approved state. Compatibility logic interprets such a state as a desired target when an active legacy post-enrollment transaction exists; otherwise it is treated as operational.
 
 ## 8. CLI responsibilities
 
@@ -232,8 +272,9 @@ Shows:
 
 - configured policy,
 - current PCR values,
-- approved PCR values,
-- drift state,
+- operational PCR values,
+- desired PCR values when present,
+- drift state relative to operational,
 - Secure Boot status where available,
 - configured volumes,
 - current TPM2 tokens,
@@ -251,63 +292,99 @@ Responsibilities:
 
 1. Load policy.
 2. Read current selected PCRs.
-3. Compare with approved state.
+3. Compare current PCRs with the operational state and report the desired target separately when present.
 4. Capture or summarize evidence when drift exists.
 5. Log the result.
 6. Never modify LUKS metadata.
 
+### `tpm-luks approve`
+
+Explicit privileged trust decision with no LUKS mutation.
+
+Preconditions include:
+
+- no conflicting active transaction,
+- current PCR values can be read,
+- current state differs from the operational baseline, or no operational baseline exists.
+
+The command shows the operational and current PCR values and requires explicit confirmation. On success it:
+
+1. captures approval-time PCR, LUKS metadata, and configured TPM event-log evidence,
+2. creates a transaction in `APPROVED_PENDING_ENROLLMENT`,
+3. writes the current PCR values as the desired target,
+4. leaves the operational target unchanged,
+5. does not invoke `systemd-cryptenroll` or otherwise modify LUKS metadata.
+
+A matching operational state has nothing to approve.
+
 ### `tpm-luks reenroll`
 
-Explicit privileged transaction.
+Explicit privileged enrollment reconciliation.
+
+`reenroll` is not a trust-approval command.
+
+Target selection:
+
+1. if a desired target exists in an active approval transaction, reconcile to desired;
+2. otherwise, if current PCRs exactly match operational, reconcile to operational as a repair operation;
+3. otherwise refuse and require `tpm-luks approve`.
+
+There is no force option that bypasses these rules.
 
 Preconditions include:
 
 - configured volumes are present and LUKS2,
 - TPM2 is available,
-- current PCR values can be read,
 - recovery-access policy is satisfied,
-- no conflicting incomplete transaction exists.
+- current PCR values exactly match the selected trusted target,
+- no conflicting transaction exists,
+- automatic signed-policy inputs outside the configured model are absent.
 
 Workflow:
 
 ```text
-preflight
+select already trusted target
    |
-capture before-state evidence
+verify current PCR == target
+   |
+capture/reuse transaction before-state evidence
    |
 optional LUKS header backup
    |
-show proposed policy and affected volumes
+show affected volumes
    |
 operator confirmation
    |
-enroll new TPM token/keyslot on each volume
+reconcile each volume with systemd-cryptenroll
    |
-verify token metadata and keyslot associations
+ADDED or ALREADY_PRESENT
    |
-capture after-enrollment evidence
+verify metadata + recovery access
    |
-mark transaction PENDING_BOOT_TEST
+mark PENDING_BOOT_TEST
 ```
 
-Enrollment is performed using the configured policy and the exact PCR digests captured during preflight, conceptually:
+Enrollment uses the exact target digests:
 
 ```text
 systemd-cryptenroll
   --tpm2-device=<configured-device>
-  --tpm2-pcrs=<PCR>:<bank>=<captured-digest>[+...]
+  --tpm2-pcrs=<PCR>:<bank>=<trusted-target-digest>[+...]
   --tpm2-pcrlock=
   --tpm2-with-pin=no
   <volume>
 ```
 
-Binding to the captured digest avoids silently enrolling against a different PCR value if the measured state changes between preflight and enrollment. Automatic `pcrlock` discovery is disabled because it is outside the configured policy model. If systemd's automatic signed-PCR public-key file is present, Phase 2 refuses enrollment rather than silently adding signed-policy semantics that the tool does not yet manage.
+Binding to the stored target ensures that `reenroll` cannot silently approve a changed PCR value.
 
-The tool must not remove old TPM enrollments during this command. The transaction records the current Linux boot ID when enrollment reaches `PENDING_BOOT_TEST`, when that identifier is available. Phase 3 can therefore prove that a later cleanup invocation occurs after a reboot, although the operator still attests that TPM unlock itself succeeded.
+The tool does not remove old TPM enrollments during this command. Existing keyslots and TPM tokens must remain, required recovery access must remain, and each volume records either:
 
-Enrollment is normally verified as additive: existing keyslots and TPM tokens must remain, exactly one new TPM token/keyslot pair must appear, and configured passphrase/recovery access must remain present.
+- `ADDED` — one new TPM token/keyslot pair was created and verified,
+- `ALREADY_PRESENT` — systemd found the exact TPM policy already enrolled and made no metadata change.
 
-`systemd-cryptenroll` is idempotent for an already enrolled exact TPM policy hash. When it returns success without changing LUKS TPM metadata, the tool records the per-volume result as `ALREADY_PRESENT` rather than failing verification. This allows a new transaction to safely continue after a previous partial multi-volume enrollment. No cleanup candidate is inferred from an `ALREADY_PRESENT` result, because the current transaction did not create a distinguishable replacement token.
+Enrollment failures remain associated with the same active transaction and may be retried. The selected target does not change because of an enrollment failure.
+
+When all configured volumes reconcile successfully and PCR values still equal the trusted target, the transaction becomes `PENDING_BOOT_TEST` and records the current Linux boot ID when available.
 
 ### `tpm-luks cleanup`
 
@@ -317,7 +394,7 @@ Preconditions include:
 
 - a transaction is in `PENDING_BOOT_TEST`, or `FAILED_CLEANUP` when resuming a handled partial cleanup,
 - the configured policy and volume set still match the transaction,
-- the current PCR state and approved state match the enrolled transaction state,
+- the current PCR state and the transaction's desired/operational target match the enrolled transaction state,
 - the verified target TPM policy hash is present on every configured volume,
 - required recovery keyslots remain present,
 - current LUKS metadata is consistent with the recorded post-enrollment state or with a recorded partial cleanup,
@@ -342,7 +419,7 @@ cryptsetup token remove --batch-mode --token-id <token> <device>
 
 Batch mode is used only after the tool has independently enforced recovery-slot, transaction, metadata, PCR, and operator-confirmation checks. Removing the keyslot first and the token second permits deterministic verification and safe retry if the operation is interrupted between those steps.
 
-After every target is removed, the tool verifies the final metadata, preserves the target-policy TPM enrollment and required recovery access, captures post-cleanup evidence, and marks the transaction `COMPLETE`.
+After every target is removed, the tool verifies the final metadata, preserves the target-policy TPM enrollment and required recovery access, and captures post-cleanup evidence. For a desired-target transaction, cleanup then promotes desired to operational and clears desired. For an operational reconciliation transaction, the operational state remains unchanged. The transaction is finally marked `COMPLETE`.
 
 ### `tpm-luks history`
 
@@ -414,29 +491,35 @@ The drift analyzer should remain PCR-aware rather than assume PCR 7 is always co
 
 ## 11. Transaction state machine
 
-Initial states:
+PCR drift approval and enrollment are intentionally separate:
 
 ```text
 NONE
   |
+  | approve current drift
+  v
+APPROVED_PENDING_ENROLLMENT
+  |
   | reenroll
   v
-PREPARING
+ENROLLING
   |
-  | all new enrollments verified
+  | all volumes reconciled
   v
 PENDING_BOOT_TEST
   |
-  | operator invokes cleanup after successful boot
+  | reboot + cleanup
   v
 CLEANING
   |
-  | obsolete keyslots/tokens removed and verified
+  | obsolete enrollments removed and verified
   v
 COMPLETE
 ```
 
-Failure states should preserve the evidence already collected:
+A repair against the existing operational target starts a `RECONCILIATION` transaction directly in `APPROVED_PENDING_ENROLLMENT`; no new trust approval is created.
+
+Failure states preserve evidence:
 
 ```text
 FAILED_PRECHECK
@@ -446,11 +529,11 @@ FAILED_CLEANUP
 CANCELLED
 ```
 
-`CANCELLED` is used when the operator declines the plan after evidence capture but before any LUKS metadata change.
+For workflow version 2, `FAILED_ENROLLMENT` and `FAILED_VERIFICATION` remain active/resumable because the approved target is still valid. `FAILED_CLEANUP` is also resumable.
 
-A partial enrollment across multiple volumes must never be silently treated as complete.
+Declining `approve` creates no trust state. Declining `reenroll` leaves an existing desired approval pending; if `reenroll` created a new operational reconciliation transaction, that new transaction is marked `CANCELLED`.
 
-The operator must be able to inspect and resume or repair an incomplete transaction.
+A partial enrollment across multiple volumes must never be silently treated as complete. Retry reconciles actual metadata to the same trusted target rather than creating a second trust decision.
 
 ## 12. Multi-volume safety
 
@@ -584,19 +667,21 @@ The implementation must maintain these invariants:
 - `check`.
 - state and history model.
 
-### Phase 2 — safe enrollment
+### Phase 2 — approval and safe enrollment
 
 Implemented:
 
+- explicit `approve` trust decision with no LUKS mutation,
+- separate operational and desired PCR state,
 - transaction creation and private on-disk state,
-- pre-change PCR, TPM event-log, and optional LUKS metadata evidence,
+- approval-time PCR, TPM event-log, and optional LUKS metadata evidence,
 - passphrase/recovery keyslot validation,
 - explicit LUKS header backup location and pre-change backups,
-- operator confirmation,
-- additive `reenroll`,
-- exact captured-PCR binding,
+- idempotent `reenroll` reconciliation,
+- exact trusted-target PCR binding,
 - post-enrollment token/keyslot verification,
-- approved-state update,
+- resumable enrollment failures,
+- operational-target reconciliation for repair without PCR drift,
 - `PENDING_BOOT_TEST` hand-off to Phase 3.
 
 ### Phase 3 — cleanup
@@ -612,6 +697,7 @@ Implemented:
 - durable per-target cleanup progress,
 - resumable `FAILED_CLEANUP` handling,
 - post-cleanup evidence and final verification,
+- desired-to-operational promotion on successful cleanup,
 - `COMPLETE` transaction state.
 
 ### Phase 4 — drift explanation and integration
@@ -630,6 +716,10 @@ Implemented:
 **PCR** — Platform Configuration Register, a TPM register extended with measurements representing parts of the boot or runtime state.
 
 **PCR bank** — The hashing algorithm namespace used for a set of PCRs, for example SHA-256.
+
+**Operational PCR state** — The PCR target that completed enrollment, reboot verification, and cleanup and therefore serves as the drift baseline.
+
+**Desired PCR state** — An explicitly approved next PCR target that has not yet completed the enrollment/boot-test/cleanup lifecycle.
 
 **TPM token** — LUKS2 metadata describing how a TPM-protected secret can unlock a LUKS keyslot.
 

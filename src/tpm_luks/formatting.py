@@ -3,13 +3,33 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from .approval import ApprovalPlan
 from .cleanup import CleanupPlan
-from .models import SystemSnapshot
+from .models import PCRState, SystemSnapshot
 from .transaction import EnrollmentPlan
 
 
 def _short(value: str | None) -> str:
     return "-" if value is None else f"{value[:12]}..."
+
+
+def _state_to_dict(state: PCRState | None) -> dict[str, Any] | None:
+    if state is None:
+        return None
+    return {
+        "policy_name": state.policy_name,
+        "bank": state.bank,
+        "pcrs": list(state.pcrs),
+        "values": {str(pcr): value for pcr, value in sorted(state.values.items())},
+    }
+
+
+def _match_text(value: bool | None) -> str:
+    if value is True:
+        return "MATCH"
+    if value is False:
+        return "CHANGED"
+    return "-"
 
 
 def format_status(snapshot: SystemSnapshot) -> str:
@@ -26,21 +46,26 @@ def format_status(snapshot: SystemSnapshot) -> str:
         f"PCRs:        {','.join(map(str, snapshot.policy.tpm.pcrs))}",
         f"Secure Boot: {secure_boot}",
         f"State:       {snapshot.drift_state.value}",
-        f"Pending tx:  {pending}",
+        f"Workflow:    {pending}",
         "",
-        "PCR  APPROVED         STATUS   CURRENT",
+        "PCR  OPERATIONAL      DESIRED          OP       TARGET   CURRENT",
     ]
     for item in snapshot.pcr_comparisons:
-        if item.matches is True:
-            status = "MATCH"
-        elif item.matches is False:
-            status = "CHANGED"
-        else:
-            status = "-"
-        lines.append(f"{item.pcr:<4} {_short(item.approved):<16} {status:<8} {item.current}")
+        lines.append(
+            f"{item.pcr:<4} {_short(item.operational):<16} {_short(item.desired):<16} "
+            f"{_match_text(item.matches_operational):<8} "
+            f"{_match_text(item.matches_desired):<8} {item.current}"
+        )
 
     for volume in snapshot.volumes:
-        lines.extend(["", f"Volume: {volume.name}", f"  UUID: {volume.uuid}", f"  Device: {volume.device}"])
+        lines.extend(
+            [
+                "",
+                f"Volume: {volume.name}",
+                f"  UUID: {volume.uuid}",
+                f"  Device: {volume.device}",
+            ]
+        )
         lines.append("  Keyslots: " + (", ".join(map(str, volume.keyslots)) or "none"))
         lines.append(
             "  Passphrase/recovery keyslots: "
@@ -66,28 +91,53 @@ def format_status(snapshot: SystemSnapshot) -> str:
     return "\n".join(lines)
 
 
+def format_approval_plan(plan: ApprovalPlan) -> str:
+    snapshot = plan.snapshot
+    lines = [
+        f"Type:        {plan.transaction_type}",
+        f"Policy:      {snapshot.policy.policy_name}",
+        f"PCR policy:  {snapshot.policy.tpm.bank}:{'+'.join(map(str, snapshot.policy.tpm.pcrs))}",
+        "",
+        "PCR  OPERATIONAL      CURRENT",
+    ]
+    for item in snapshot.pcr_comparisons:
+        lines.append(
+            f"{item.pcr:<4} {_short(item.operational):<16} {item.current}"
+        )
+    lines.extend(
+        [
+            "",
+            "Approval records the current PCR values as the desired target.",
+            "No LUKS keyslot or token is changed by this command.",
+        ]
+    )
+    return "\n".join(lines)
+
+
 def format_enrollment_plan(plan: EnrollmentPlan) -> str:
     snapshot = plan.snapshot
     lines = [
         f"Transaction: {plan.transaction_id}",
         f"Type:        {plan.transaction_type}",
+        f"Target:      {plan.target_source}",
         f"Policy:      {snapshot.policy.policy_name}",
         f"PCR policy:  {snapshot.policy.tpm.bank}:{'+'.join(map(str, snapshot.policy.tpm.pcrs))}",
         "",
-        "PCR  APPROVED         CURRENT",
+        "PCR  TARGET                                                           CURRENT",
     ]
-    for item in snapshot.pcr_comparisons:
-        lines.append(f"{item.pcr:<4} {_short(item.approved):<16} {item.current}")
+    for pcr in snapshot.policy.tpm.pcrs:
+        lines.append(f"{pcr:<4} {plan.target_pcrs[pcr]:<64} {snapshot.current_pcrs[pcr]}")
 
-    lines.append("")
-    lines.append("Volumes:")
+    lines.extend(["", "Volumes:"])
     for volume in snapshot.volumes:
         recovery = ",".join(map(str, volume.recovery_keyslots)) or "none"
         tokens = ", ".join(
             f"token {token.token_id}->keyslot {','.join(map(str, token.keyslots))}"
             for token in volume.tpm_tokens
         ) or "none"
-        lines.append(f"  {volume.name}: recovery/passphrase keyslots={recovery}; TPM={tokens}")
+        lines.append(
+            f"  {volume.name}: recovery/passphrase keyslots={recovery}; TPM={tokens}"
+        )
     if plan.header_backup_dir:
         lines.append(f"Header backups: {plan.header_backup_dir}")
     else:
@@ -95,8 +145,8 @@ def format_enrollment_plan(plan: EnrollmentPlan) -> str:
     lines.extend(
         [
             "",
-            "The operation only ADDS new TPM enrollments.",
-            "No existing keyslot or token will be removed in Phase 2.",
+            "The operation reconciles each volume to the already approved target.",
+            "Existing keyslots/tokens are not removed by reenroll.",
         ]
     )
     return "\n".join(lines)
@@ -106,6 +156,7 @@ def format_cleanup_plan(plan: CleanupPlan) -> str:
     lines = [
         f"Transaction: {plan.transaction_id}",
         f"State:       {plan.previous_state}",
+        f"Target:      {plan.target_source}",
         f"Boot check:  {plan.boot_verification}",
         "Target TPM policy hash:",
     ]
@@ -150,6 +201,8 @@ def snapshot_to_dict(snapshot: SystemSnapshot) -> dict[str, Any]:
         "policy_name": snapshot.policy.policy_name,
         "drift_state": snapshot.drift_state.value,
         "secure_boot": snapshot.secure_boot,
+        "operational_state": _state_to_dict(snapshot.operational_state),
+        "desired_state": _state_to_dict(snapshot.desired_state),
         "pending_transaction": (
             {
                 "id": snapshot.pending_transaction_id,
@@ -166,9 +219,11 @@ def snapshot_to_dict(snapshot: SystemSnapshot) -> dict[str, Any]:
         "pcrs": [
             {
                 "pcr": item.pcr,
-                "approved": item.approved,
+                "operational": item.operational,
+                "desired": item.desired,
                 "current": item.current,
-                "matches": item.matches,
+                "matches_operational": item.matches_operational,
+                "matches_desired": item.matches_desired,
             }
             for item in snapshot.pcr_comparisons
         ],

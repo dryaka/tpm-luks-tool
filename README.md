@@ -4,7 +4,7 @@ A small, policy-driven Linux administration tool for managing TPM2-bound LUKS2 u
 
 The tool is intended to:
 
-- detect PCR drift against an approved policy,
+- detect PCR drift against the last operationally verified policy,
 - explain what changed in the measured boot state,
 - safely enroll replacement TPM-backed LUKS2 keyslots,
 - preserve passphrase/recovery access,
@@ -24,46 +24,31 @@ Configuration is explicit and local using TOML. Runtime state and transaction hi
 
 ## Current implementation
 
-Phase 1 provides the read-only model:
+The implemented workflow separates three different concerns:
 
-- strict TOML policy loading and validation,
-- PCR reads through `systemd-analyze pcrs`,
-- Secure Boot state read from the EFI variable filesystem when available,
-- LUKS2 JSON metadata reads through `cryptsetup luksDump --dump-json-metadata`,
-- TPM token/keyslot association inspection,
-- comparison with stored approved PCR state,
-- human-readable `status`,
-- machine-readable JSON `check`,
-- read-only `history` and `show`.
+- **approval** — an explicit trust decision about the currently observed PCR values,
+- **reenrollment** — idempotent reconciliation of configured LUKS2 volumes to an already trusted target,
+- **cleanup** — destructive retirement of proven obsolete TPM enrollments only after reboot verification.
 
-Phase 2 adds safe enrollment:
+The runtime PCR state distinguishes:
 
-- transaction creation and durable manifests,
-- pre-change PCR and LUKS metadata evidence,
-- TPM event-log capture as the raw firmware event-log binary,
+- **operational** — the PCR target that completed enrollment, reboot verification, and cleanup,
+- **desired** — a newly approved target that is still progressing through enrollment/boot verification.
+
+Read-only functionality includes strict TOML validation, PCR reads through `systemd-analyze pcrs`, Secure Boot inspection, LUKS2 JSON metadata inspection, TPM token/keyslot associations, human-readable `status`, machine-readable `check`, and transaction `history`/`show`.
+
+The mutating workflow provides:
+
+- `approve` with no LUKS mutation,
+- additive/idempotent `systemd-cryptenroll` reconciliation,
+- exact PCR-value binding,
 - recovery/passphrase keyslot validation,
-- optional LUKS header backup before any enrollment,
-- explicit operator confirmation,
-- additive `systemd-cryptenroll` enrollment only,
-- idempotent handling when the exact TPM policy is already enrolled,
-- post-enrollment token/keyslot verification,
-- exact PCR-value binding for the configured policy,
-- approved-state update only after every configured volume verifies,
-- final transaction state `PENDING_BOOT_TEST`.
-
-Phase 2 never removes an existing LUKS keyslot or token.
-
-Phase 3 adds explicit cleanup after a successful boot test:
-
-- verifies the pending transaction, approved PCR state, and current PCR values,
-- detects a reboot by boot ID for transactions created by version 0.3.0 and later,
-- requires operator confirmation that reboot and TPM unlock succeeded,
-- derives the exact target TPM policy hash from the replacement enrollment,
-- refuses cleanup when obsolete enrollment identity cannot be proven,
-- creates fresh pre-cleanup LUKS header backups when header backup is enabled,
-- removes only recorded obsolete TPM keyslot/token pairs,
-- supports retry after an interrupted or failed cleanup,
-- captures post-cleanup LUKS metadata and marks the transaction `COMPLETE`.
+- pre-enrollment and pre-cleanup LUKS header backups when configured,
+- per-volume `ADDED` / `ALREADY_PRESENT` outcomes,
+- boot-ID evidence,
+- TPM policy-hash based cleanup targeting,
+- resumable enrollment/cleanup failure states,
+- final promotion of desired -> operational only when cleanup reaches `COMPLETE`.
 
 The current implementation supports the SHA-256 PCR bank and automatic TPM device selection. PCR selection itself is policy-driven and may contain one or more PCR indices.
 
@@ -108,6 +93,7 @@ Implemented:
 ```text
 tpm-luks status
 tpm-luks check
+tpm-luks approve
 tpm-luks reenroll
 tpm-luks cleanup
 tpm-luks history
@@ -122,44 +108,64 @@ sudo .venv/bin/tpm-luks status \
   --state-dir /tmp/tpm-luks-test-state
 ```
 
-### Safe re-enrollment
+### Approve PCR drift
 
-`reenroll` is a privileged, mutating command:
+When the current PCR state differs from the operational baseline, approval is a separate trust decision:
+
+```bash
+sudo .venv/bin/tpm-luks approve \
+  --config ./test-policy.toml \
+  --state-dir ../tpm-luks-test-state
+```
+
+`approve` shows the operational and current PCR values and asks for confirmation. It records the current values as the **desired** target and creates an `APPROVED_PENDING_ENROLLMENT` transaction. It does **not** modify any LUKS keyslot or token.
+
+If the current PCR values already match the operational baseline, there is nothing to approve.
+
+### Reconcile LUKS enrollments
+
+`reenroll` is a privileged reconciliation command:
 
 ```bash
 sudo .venv/bin/tpm-luks reenroll \
   --config ./test-policy.toml \
-  --state-dir /var/lib/tpm-luks
+  --state-dir ../tpm-luks-test-state
 ```
+
+If a desired target exists, `reenroll` reconciles every configured volume to that target. If no desired target exists, it may reconcile to the existing operational target only when the current PCR values still match that operational baseline. Therefore PCR drift can never be trusted implicitly by `reenroll`.
 
 The command:
 
-1. validates policy and recovery/passphrase keyslots,
-2. captures pre-change evidence,
-3. shows the exact plan,
-4. asks for confirmation,
-5. backs up every configured LUKS header when enabled,
-6. adds one new TPM enrollment per volume when the exact policy is not already present,
-7. accepts systemd's successful exact-policy no-op as `ALREADY_PRESENT`,
-8. verifies that no existing keyslot/token disappeared and recovery access remains,
-9. records the approved PCR state,
+1. selects the desired or operational target,
+2. verifies current PCR values exactly match that already trusted target,
+3. validates recovery/passphrase keyslots,
+4. shows the target and affected volumes,
+5. asks for confirmation,
+6. backs up every configured LUKS header when enabled,
+7. invokes `systemd-cryptenroll` for each volume,
+8. records `ADDED` or `ALREADY_PRESENT` per volume,
+9. verifies the resulting LUKS metadata and recovery access,
 10. finishes as `PENDING_BOOT_TEST`.
 
-`systemd-cryptenroll` may request an existing LUKS passphrase or recovery key for each volume.
+`systemd-cryptenroll` may request an existing LUKS passphrase or recovery key for each volume. Existing keyslots/tokens are never removed by `reenroll`.
 
-After success, reboot and verify TPM unlock, then run:
+There is no `--force` trust override. If current PCRs differ from the operational baseline and no desired target exists, `reenroll` refuses and instructs the operator to run `approve`.
+
+After successful enrollment, reboot and verify TPM unlock, then run:
 
 ```bash
 sudo .venv/bin/tpm-luks cleanup \
   --config ./test-policy.toml \
-  --state-dir /var/lib/tpm-luks
+  --state-dir ../tpm-luks-test-state
 ```
 
-`cleanup` shows the exact token/keyslot pairs it proposes to remove. Confirmation attests that the reboot and TPM unlock succeeded. For transactions created by version 0.3.0 and later, the tool additionally refuses cleanup if the Linux boot ID has not changed since enrollment. Older transactions do not contain that evidence and are therefore reported as requiring operator attestation.
+`cleanup` shows the exact token/keyslot pairs it proposes to remove. Confirmation attests that reboot and TPM unlock succeeded. For transactions that recorded an enrollment boot ID, the tool also refuses cleanup if the Linux boot ID has not changed.
 
-Cleanup is resumable after a handled interruption or command failure. A failed cleanup remains an active transaction in `FAILED_CLEANUP`; rerunning `cleanup` reconciles current LUKS metadata with the recorded cleanup targets and continues only when the partial state is safe and explainable.
+Cleanup is resumable after a handled interruption or command failure. A failed cleanup remains active in `FAILED_CLEANUP`; rerunning `cleanup` reconciles the actual LUKS state with the recorded cleanup progress.
 
-Use `--yes` only when you intentionally want to skip the interactive confirmation. For `cleanup`, `--yes` is also the operator attestation that the post-enrollment reboot and TPM unlock were successful. `reenroll --force` allows re-enrollment even when the current PCR state already matches the approved state.
+For a desired-target transaction, successful cleanup promotes **desired -> operational** and clears desired. For an operational reconciliation transaction, the operational baseline is unchanged.
+
+Use `--yes` only when intentionally skipping an interactive confirmation. On `approve`, `--yes` is an explicit trust approval. On `cleanup`, it is also the operator attestation that reboot and TPM unlock succeeded.
 
 ## Runtime data
 
@@ -167,7 +173,7 @@ Default runtime location:
 
 ```text
 /var/lib/tpm-luks/
-├── state.json
+├── state.json        # operational + optional desired PCR target
 └── history/
     └── <transaction-id>/
         ├── manifest.json
@@ -181,6 +187,8 @@ Default runtime location:
 
 State/history directories are created with mode `0700`; generated files are mode `0600`.
 
+Version 0.4 remains compatible with the flat `state.json` written by versions up to 0.3. If such a state belongs to an active legacy `PENDING_BOOT_TEST`/cleanup transaction, it is interpreted as the desired target and successful cleanup migrates it to the new operational/desired format. Otherwise the flat state is treated as the operational baseline.
+
 Phase 2 creates a pre-enrollment header backup. Phase 3 creates a separate pre-cleanup header backup before deleting any obsolete keyslot, because the pre-enrollment backup does not contain the replacement TPM enrollment.
 
 LUKS header backups are deliberately stored outside this runtime tree and are sensitive. The concern is not that the live LUKS header is normally secret; rather, an old backup preserves historical keyslot/authentication state. Restoring it can therefore make an authentication method that was later removed or rotated valid again, provided the corresponding secret is still known. Retain and dispose of old backups accordingly.
@@ -191,11 +199,11 @@ LUKS header backups are deliberately stored outside this runtime tree and are se
 
 | Code | Meaning |
 | ---: | --- |
-| 0 | Current PCR policy matches approved state |
+| 0 | Current PCR state matches the operational baseline |
 | 1 | Configuration, command, metadata, or runtime error |
-| 2 | PCR drift |
-| 3 | No approved state exists |
-| 4 | Configured policy differs from stored approved policy |
+| 2 | PCR drift from the operational baseline |
+| 3 | No operational baseline exists |
+| 4 | Configured policy differs from the operational baseline |
 
 ## Development
 

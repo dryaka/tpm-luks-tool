@@ -35,7 +35,7 @@ class CLIHelpTests(unittest.TestCase):
         self.assertIn("--config PATH", help_text)
         self.assertIn("--state-dir PATH", help_text)
         self.assertIn("Exit codes:", help_text)
-        self.assertIn("PCR drift detected", help_text)
+        self.assertIn("PCR drift from operational baseline", help_text)
 
     def test_history_help_only_has_relevant_state_option(self):
         help_text = self._help("history")

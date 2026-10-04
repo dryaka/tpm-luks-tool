@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from .luks import LUKSMetadataReader
-from .models import ApprovedState, Policy, TPMToken, VolumeMetadata, VolumePolicy
+from .models import PCRState, Policy, TPMToken, VolumeMetadata, VolumePolicy
 from .pcr import PCRReader
 from .runner import CommandError, Runner
 from .state import StateError, StateStore
@@ -40,6 +40,7 @@ class CleanupPlan:
     boot_id_at_enroll: str | None
     current_boot_id: str | None
     header_backup_dir: str | None
+    target_source: str
 
 
 _BOOT_ID_PATH = Path("/proc/sys/kernel/random/boot_id")
@@ -116,7 +117,10 @@ class CleanupService:
         current_pcrs = self.pcr_reader.read(self.policy.tpm.pcrs, self.policy.tpm.bank)
         if current_pcrs != expected_pcrs:
             raise CleanupError("current PCR values do not match the enrolled transaction state")
-        self._validate_approved_state(expected_pcrs)
+        target_source = str(manifest.get("target_source", "desired"))
+        if target_source not in {"desired", "operational"}:
+            raise CleanupError(f"invalid transaction target source: {target_source}")
+        self._validate_target_state(expected_pcrs, target_source)
 
         boot_id_at_enroll = manifest.get("boot_id_at_enroll")
         if boot_id_at_enroll is not None and not isinstance(boot_id_at_enroll, str):
@@ -166,6 +170,7 @@ class CleanupService:
             header_backup_dir=self.policy.audit.header_backup_dir
             if self.policy.audit.header_backup
             else None,
+            target_source=target_source,
         )
 
     def execute(self, plan: CleanupPlan) -> dict[str, Any]:
@@ -206,10 +211,16 @@ class CleanupService:
                     ) from exc
 
             self._verify_complete(plan)
+            completed_at = _now()
+            if plan.target_source == "desired":
+                self.state_store.promote_desired_to_operational(
+                    transaction_id=plan.transaction_id,
+                    established_at=completed_at,
+                )
             return self.state_store.update_manifest(
                 plan.transaction_id,
                 state="COMPLETE",
-                completed_at=_now(),
+                completed_at=completed_at,
                 cleanup_boot_id=plan.current_boot_id,
             )
         except KeyboardInterrupt as exc:
@@ -264,18 +275,25 @@ class CleanupService:
             values[pcr] = value.lower()
         return values
 
-    def _validate_approved_state(self, expected_pcrs: dict[int, str]) -> None:
-        approved = self.state_store.load_approved_state()
-        if approved is None:
-            raise CleanupError("approved state is missing")
-        expected = ApprovedState(
+    def _validate_target_state(
+        self,
+        expected_pcrs: dict[int, str],
+        target_source: str,
+    ) -> None:
+        operational, desired = self.state_store.load_policy_states()
+        actual = desired if target_source == "desired" else operational
+        if actual is None:
+            raise CleanupError(f"{target_source} PCR target is missing")
+        expected = PCRState(
             policy_name=self.policy.policy_name,
             bank=self.policy.tpm.bank,
             pcrs=self.policy.tpm.pcrs,
             values=expected_pcrs,
         )
-        if approved != expected:
-            raise CleanupError("approved state no longer matches the transaction")
+        if actual != expected:
+            raise CleanupError(
+                f"{target_source} PCR target no longer matches the transaction"
+            )
 
     def _validate_recovery_access(self, volumes: dict[str, VolumeMetadata]) -> None:
         minimum = self.policy.luks.minimum_recovery_slots if self.policy.luks.require_recovery_slot else 0
@@ -715,7 +733,7 @@ class CleanupService:
                 )
 
         self._validate_recovery_access(current_volumes)
-        self._validate_approved_state(expected_pcrs)
+        self._validate_target_state(expected_pcrs, plan.target_source)
 
         for volume_targets in manifest.get("cleanup_targets", {}).values():
             if not isinstance(volume_targets, list):
