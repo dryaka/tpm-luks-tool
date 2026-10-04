@@ -1,8 +1,10 @@
 import contextlib
 import io
 import unittest
+from unittest.mock import patch
 
 from tpm_luks.cli import build_parser, main
+from tpm_luks.state import StateError
 
 
 class CLIHelpTests(unittest.TestCase):
@@ -41,6 +43,22 @@ class CLIHelpTests(unittest.TestCase):
         help_text = self._help("history")
         self.assertIn("--state-dir PATH", help_text)
         self.assertNotIn("--config PATH", help_text)
+
+
+    def test_history_reports_state_access_error(self):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        error = StateError(
+            "cannot read history directory /protected/history: [Errno 13] Permission denied"
+        )
+        with patch("tpm_luks.cli.StateStore.list_history", side_effect=error):
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                result = main(["history", "--state-dir", "/protected"])
+
+        self.assertEqual(result, 1)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertIn("Permission denied", stderr.getvalue())
+        self.assertNotIn("No transaction history.", stderr.getvalue())
 
     def test_show_help_describes_transaction_id(self):
         help_text = self._help("show")
