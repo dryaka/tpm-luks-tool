@@ -75,7 +75,7 @@ Fedora:
 
 ```bash
 sudo dnf install \
-  git rpm-build pyproject-rpm-macros \
+  git gzip rpm rpm-build pyproject-rpm-macros \
   python3-devel python3-pip python3-setuptools python3-wheel
 ```
 
@@ -85,7 +85,7 @@ Rocky Linux 9:
 sudo dnf install dnf-plugins-core
 sudo dnf config-manager --set-enabled crb
 sudo dnf install \
-  git rpm-build pyproject-rpm-macros \
+  git gzip rpm rpm-build pyproject-rpm-macros \
   python3.11-devel python3.11-pip python3.11-setuptools \
   python3.11-wheel python3.11-rpm-macros
 ```
@@ -98,8 +98,18 @@ From a clean Git checkout:
 sh packaging/build-rpm.sh
 ```
 
-The helper creates a reproducible source archive from `HEAD`, runs
-`rpmbuild -ba`, and writes binary/source RPMs under:
+Before building, the helper checks the required RPM build toolchain and
+distribution-specific build packages. On Fedora it checks the default Python
+stack; on RHEL-compatible version 9 systems it checks the Python 3.11 stack.
+If anything is missing, it exits before `rpmbuild` and prints the exact
+`sudo dnf install ...` command required to satisfy the preflight.
+
+The preflight never installs packages automatically. Build dependencies are
+needed only to construct the RPM and are distinct from the runtime dependencies
+declared by the resulting package.
+
+After preflight, the helper creates a reproducible source archive from `HEAD`,
+runs `rpmbuild -ba`, and writes binary/source RPMs under:
 
 ```text
 dist/rpm/
