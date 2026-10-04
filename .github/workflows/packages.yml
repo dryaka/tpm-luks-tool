@@ -134,8 +134,8 @@ jobs:
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y ./dist/deb/tpm-luks-tool_*_all.deb
           tpm-luks --help
           test -f /etc/tpm-luks.toml
-          test "$(stat -c '%a:%U:%G' /var/lib/tpm-luks)" = "700:root:root"
-          test "$(stat -c '%a:%U:%G' /var/lib/tpm-luks/history)" = "700:root:root"
+          test "$(sudo stat -c '%a:%U:%G' /var/lib/tpm-luks)" = "700:root:root"
+          test "$(sudo stat -c '%a:%U:%G' /var/lib/tpm-luks/history)" = "700:root:root"
       - uses: actions/upload-artifact@v4
         with:
           name: deb-ubuntu2404
