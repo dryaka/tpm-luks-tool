@@ -303,7 +303,9 @@ systemd-cryptenroll
 
 Binding to the captured digest avoids silently enrolling against a different PCR value if the measured state changes between preflight and enrollment. Automatic `pcrlock` discovery is disabled because it is outside the configured policy model. If systemd's automatic signed-PCR public-key file is present, Phase 2 refuses enrollment rather than silently adding signed-policy semantics that the tool does not yet manage.
 
-The tool must not remove old TPM enrollments during this command. Enrollment is normally verified as additive: existing keyslots and TPM tokens must remain, exactly one new TPM token/keyslot pair must appear, and configured passphrase/recovery access must remain present.
+The tool must not remove old TPM enrollments during this command. The transaction records the current Linux boot ID when enrollment reaches `PENDING_BOOT_TEST`, when that identifier is available. Phase 3 can therefore prove that a later cleanup invocation occurs after a reboot, although the operator still attests that TPM unlock itself succeeded.
+
+Enrollment is normally verified as additive: existing keyslots and TPM tokens must remain, exactly one new TPM token/keyslot pair must appear, and configured passphrase/recovery access must remain present.
 
 `systemd-cryptenroll` is idempotent for an already enrolled exact TPM policy hash. When it returns success without changing LUKS TPM metadata, the tool records the per-volume result as `ALREADY_PRESENT` rather than failing verification. This allows a new transaction to safely continue after a previous partial multi-volume enrollment. No cleanup candidate is inferred from an `ALREADY_PRESENT` result, because the current transaction did not create a distinguishable replacement token.
 
@@ -313,16 +315,34 @@ Explicit privileged destructive step.
 
 Preconditions include:
 
-- a transaction is in `PENDING_BOOT_TEST`,
-- the current PCR state matches the newly approved transaction state,
-- the new TPM token/keyslot still exists on every configured volume,
-- required recovery keyslots remain present.
+- a transaction is in `PENDING_BOOT_TEST`, or `FAILED_CLEANUP` when resuming a handled partial cleanup,
+- the configured policy and volume set still match the transaction,
+- the current PCR state and approved state match the enrolled transaction state,
+- the verified target TPM policy hash is present on every configured volume,
+- required recovery keyslots remain present,
+- current LUKS metadata is consistent with the recorded post-enrollment state or with a recorded partial cleanup,
+- for transactions that recorded the enrollment boot ID, the current boot ID differs.
+
+The operator confirmation attests that the system successfully rebooted and unlocked using the replacement TPM policy. Transactions created before boot-ID recording are allowed only with this explicit operator attestation and are marked accordingly in the cleanup plan.
+
+The target TPM policy is identified by the `tpm2-policy-hash` stored in systemd TPM2 LUKS tokens. For an `ADDED` volume, the recorded replacement token establishes the target hash. For a mixed transaction, including an `ALREADY_PRESENT` volume, the same target hash is then used to distinguish the already-present replacement token from obsolete tokens. If the target policy cannot be identified uniquely, cleanup refuses to proceed.
+
+Cleanup candidates are restricted to TPM tokens that existed in the transaction's before-state and whose policy hash differs from the verified target policy. The tool also verifies that each candidate keyslot is referenced only by the candidate token. It never guesses destructive identifiers and preserves all tokens carrying the target policy hash.
+
+Before the first deletion, Phase 3 creates a fresh pre-cleanup LUKS header backup for every configured volume when header backup is enabled. This is distinct from the Phase 2 pre-enrollment backup.
 
 The tool must show the exact obsolete keyslots and tokens that will be removed before confirmation.
 
-Cleanup uses explicit keyslot and token identifiers discovered from LUKS2 JSON metadata. It must never assume fixed keyslot numbers.
+Cleanup removes each recorded pair in this order:
 
-After successful cleanup, the transaction becomes `COMPLETE`.
+```text
+cryptsetup luksKillSlot --batch-mode <device> <keyslot>
+cryptsetup token remove --batch-mode --token-id <token> <device>
+```
+
+Batch mode is used only after the tool has independently enforced recovery-slot, transaction, metadata, PCR, and operator-confirmation checks. Removing the keyslot first and the token second permits deterministic verification and safe retry if the operation is interrupted between those steps.
+
+After every target is removed, the tool verifies the final metadata, preserves the target-policy TPM enrollment and required recovery access, captures post-cleanup evidence, and marks the transaction `COMPLETE`.
 
 ### `tpm-luks history`
 
@@ -581,10 +601,18 @@ Implemented:
 
 ### Phase 3 — cleanup
 
-- boot-test state handling,
-- obsolete enrollment identification,
-- explicit `cleanup`,
-- final transaction verification.
+Implemented:
+
+- boot-ID evidence for new enrollments with legacy operator-attestation fallback,
+- TPM policy-hash parsing and target-policy identification,
+- conservative obsolete enrollment identification,
+- explicit destructive cleanup plan and confirmation,
+- separate pre-cleanup LUKS header backups,
+- exact keyslot/token deletion by recorded identifiers,
+- durable per-target cleanup progress,
+- resumable `FAILED_CLEANUP` handling,
+- post-cleanup evidence and final verification,
+- `COMPLETE` transaction state.
 
 ### Phase 4 — drift explanation and integration
 
@@ -604,6 +632,8 @@ Implemented:
 **PCR bank** — The hashing algorithm namespace used for a set of PCRs, for example SHA-256.
 
 **TPM token** — LUKS2 metadata describing how a TPM-protected secret can unlock a LUKS keyslot.
+
+**TPM policy hash** — Digest stored in a systemd TPM2 LUKS token that identifies the TPM policy used for that enrollment. Phase 3 uses it to distinguish the verified replacement policy from obsolete TPM enrollments.
 
 **Keyslot** — A LUKS metadata object containing protected material capable of recovering the volume encryption key.
 

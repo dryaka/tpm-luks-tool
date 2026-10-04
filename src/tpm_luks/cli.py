@@ -5,8 +5,14 @@ import json
 import os
 import sys
 
+from .cleanup import CleanupError, CleanupInterrupted, CleanupService
 from .config import PolicyError, load_policy
-from .formatting import format_check_json, format_enrollment_plan, format_status
+from .formatting import (
+    format_check_json,
+    format_cleanup_plan,
+    format_enrollment_plan,
+    format_status,
+)
 from .luks import LUKSMetadataError, LUKSMetadataReader
 from .models import DriftState
 from .pcr import PCRReadError, PCRReader
@@ -22,10 +28,13 @@ EXIT_DRIFT = 2
 EXIT_UNINITIALIZED = 3
 EXIT_POLICY_CHANGE = 4
 
-_COMMANDS = {"status", "check", "history", "show", "reenroll"}
+_COMMANDS = {"status", "check", "history", "show", "reenroll", "cleanup"}
 _VALUE_OPTIONS = {"--config", "--state-dir"}
 _HELP_OPTIONS = {"-h", "--help"}
-_COMMAND_FLAGS = {"reenroll": {"--yes", "--force"}}
+_COMMAND_FLAGS = {
+    "reenroll": {"--yes", "--force"},
+    "cleanup": {"--yes"},
+}
 
 
 def _active_option_positions(argv: list[str], options: set[str]) -> set[int]:
@@ -195,6 +204,27 @@ def build_parser() -> argparse.ArgumentParser:
         help="allow re-enrollment even when current PCR state already matches approved state",
     )
 
+    cleanup = sub.add_parser(
+        "cleanup",
+        help="remove obsolete TPM enrollments after a successful boot test",
+        description=(
+            "Verify the pending transaction and current PCR state, identify only the obsolete "
+            "TPM token/keyslot pairs proven by the transaction evidence, show the exact targets, "
+            "then remove them after explicit confirmation."
+        ),
+        epilog=(
+            "The operator confirmation attests that the system successfully rebooted and unlocked "
+            "with the replacement TPM policy. For transactions created by this version, the tool "
+            "also verifies that the boot ID changed since enrollment.\n\n"
+            "Example:\n"
+            "  sudo tpm-luks cleanup --config /etc/tpm-luks.toml"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    _add_config_option(cleanup, suppress_default=True)
+    _add_state_option(cleanup, suppress_default=True)
+    cleanup.add_argument("--yes", action="store_true", help="skip the interactive confirmation")
+
     history = sub.add_parser(
         "history",
         help="list stored transaction manifests",
@@ -283,6 +313,32 @@ def _run_reenroll(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _run_cleanup(args: argparse.Namespace) -> int:
+    if os.geteuid() != 0:
+        raise CleanupError("cleanup must run as root")
+    policy = load_policy(args.config)
+    runner = Runner()
+    store = StateStore(args.state_dir)
+    service = CleanupService(policy, runner, PCRReader(runner), LUKSMetadataReader(runner), store)
+    plan = service.prepare()
+    print(format_cleanup_plan(plan))
+    if not args.yes:
+        if not sys.stdin.isatty():
+            raise CleanupError("interactive confirmation requires a TTY; use --yes to approve explicitly")
+        try:
+            answer = input(
+                "Confirm successful reboot/TPM unlock and remove the listed obsolete enrollments? [y/N] "
+            ).strip().lower()
+        except KeyboardInterrupt as exc:
+            raise CleanupInterrupted("interrupted before cleanup; transaction unchanged") from exc
+        if answer not in {"y", "yes"}:
+            print("Cleanup cancelled; transaction remains pending.")
+            return EXIT_OK
+    manifest = service.execute(plan)
+    print(f"Transaction {plan.transaction_id}: {manifest['state']}")
+    return EXIT_OK
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     raw_argv = list(sys.argv[1:] if argv is None else argv)
@@ -298,6 +354,8 @@ def main(argv: list[str] | None = None) -> int:
             return EXIT_OK
         if args.command == "reenroll":
             return _run_reenroll(args)
+        if args.command == "cleanup":
+            return _run_cleanup(args)
 
         snapshot = _load_snapshot(args.config, args.state_dir)
         if args.command == "status":
@@ -306,7 +364,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "check":
             print(format_check_json(snapshot))
             return _drift_exit_code(snapshot.drift_state)
-    except EnrollmentInterrupted as exc:
+    except (EnrollmentInterrupted, CleanupInterrupted) as exc:
         print(f"\ntpm-luks: {exc}", file=sys.stderr)
         return 130
     except KeyboardInterrupt:
@@ -319,6 +377,7 @@ def main(argv: list[str] | None = None) -> int:
         LUKSMetadataError,
         CommandError,
         EnrollmentError,
+        CleanupError,
         OSError,
     ) as exc:
         print(f"tpm-luks: {exc}", file=sys.stderr)

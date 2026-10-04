@@ -68,6 +68,7 @@ class TPMToken:
     keyslots: tuple[int, ...]
     pcrs: tuple[int, ...]
     bank: str | None
+    policy_hashes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

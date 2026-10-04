@@ -52,6 +52,27 @@ def _token_keyslots(token_id: str, token: dict[str, Any]) -> tuple[int, ...]:
         raise LUKSMetadataError(f"token {token_id} has a non-numeric keyslot") from exc
 
 
+def _policy_hashes(token_id: int, token: dict[str, Any]) -> tuple[str, ...]:
+    raw = token.get("tpm2-policy-hash")
+    if raw is None:
+        return ()
+    values = [raw] if isinstance(raw, str) else raw
+    if not isinstance(values, list) or not values or any(not isinstance(item, str) for item in values):
+        raise LUKSMetadataError(f"TPM token {token_id} has invalid tpm2-policy-hash field")
+    normalized: list[str] = []
+    for item in values:
+        if not item or len(item) % 2:
+            raise LUKSMetadataError(f"TPM token {token_id} has invalid tpm2-policy-hash field")
+        try:
+            bytes.fromhex(item)
+        except ValueError as exc:
+            raise LUKSMetadataError(
+                f"TPM token {token_id} has invalid tpm2-policy-hash field"
+            ) from exc
+        normalized.append(item.lower())
+    return tuple(normalized)
+
+
 def parse_luks_metadata(volume: VolumePolicy, device: str, metadata: dict[str, Any]) -> VolumeMetadata:
     if not isinstance(metadata, dict):
         raise LUKSMetadataError("LUKS2 metadata root must be an object")
@@ -91,6 +112,7 @@ def parse_luks_metadata(volume: VolumePolicy, device: str, metadata: dict[str, A
                 keyslots=token_keyslots,
                 pcrs=tuple(sorted(raw_pcrs)),
                 bank=bank,
+                policy_hashes=_policy_hashes(token_id, token),
             )
         )
 

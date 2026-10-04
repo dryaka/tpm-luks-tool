@@ -19,6 +19,7 @@ class LUKSTests(unittest.TestCase):
                     "keyslots": ["2"],
                     "tpm2-pcrs": [7],
                     "tpm2-pcr-bank": "sha256",
+                    "tpm2-policy-hash": "AABB",
                 },
                 "3": {"type": "systemd-fido2", "keyslots": ["4"]},
             },
@@ -29,6 +30,7 @@ class LUKSTests(unittest.TestCase):
         self.assertEqual(parsed.token_bound_keyslots, (2, 4))
         self.assertEqual(parsed.recovery_keyslots, (0,))
         self.assertEqual(parsed.tpm_tokens[0].token_id, 1)
+        self.assertEqual(parsed.tpm_tokens[0].policy_hashes, ("aabb",))
 
 
 if __name__ == "__main__":
