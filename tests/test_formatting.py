@@ -10,20 +10,41 @@ from tpm_luks.models import (
     Policy,
     SystemSnapshot,
     TPMPolicy,
+    TPMToken,
+    VolumeMetadata,
 )
 
 
 class FormattingTests(unittest.TestCase):
-    def test_status_distinguishes_operational_desired_and_current(self):
+    def test_status_shows_full_pcr_and_policy_digests_multiline(self):
         current = "a" * 64
         operational = "b" * 64
         desired = current
+        policy_hash = "c" * 64
         policy = Policy(
             "test",
             TPMPolicy("auto", "sha256", (7,)),
             (),
             LUKSPolicy(),
             AuditPolicy(),
+        )
+        volume = VolumeMetadata(
+            name="A",
+            uuid="9f36aa12-4b29-4e3d-9b1a-2d4ce85f71a0",
+            device="/dev/disk/by-uuid/9f36aa12-4b29-4e3d-9b1a-2d4ce85f71a0",
+            keyslots=(0, 1),
+            tpm_tokens=(
+                TPMToken(
+                    token_id=0,
+                    keyslots=(1,),
+                    pcrs=(7,),
+                    bank="sha256",
+                    policy_hashes=(policy_hash,),
+                ),
+            ),
+            non_tpm_keyslots=(0,),
+            token_bound_keyslots=(1,),
+            recovery_keyslots=(0,),
         )
         snapshot = SystemSnapshot(
             policy=policy,
@@ -41,21 +62,23 @@ class FormattingTests(unittest.TestCase):
                     matches_desired=True,
                 ),
             ),
-            volumes=(),
+            volumes=(volume,),
             secure_boot=True,
             pending_transaction_id="tx",
             pending_transaction_state="APPROVED_PENDING_ENROLLMENT",
         )
 
         output = format_status(snapshot)
-        line = next(line for line in output.splitlines() if line.startswith("7"))
-        self.assertTrue(line.endswith(current))
-        self.assertIn("CHANGED", line)
-        self.assertIn("MATCH", line)
-        header = next(line for line in output.splitlines() if line.startswith("PCR  "))
-        self.assertIn("OPERATIONAL", header)
-        self.assertIn("DESIRED", header)
-        self.assertTrue(header.endswith("CURRENT"))
+
+        self.assertIn("PCR state:\n  PCR 7:", output)
+        self.assertIn(f"    Operational:       {operational}", output)
+        self.assertIn(f"    Desired:           {desired}", output)
+        self.assertIn(f"    Current:           {current}", output)
+        self.assertIn("    Operational match: CHANGED", output)
+        self.assertIn("    Desired match:     MATCH", output)
+        self.assertIn("    token 0: keyslot=1 bank=sha256 pcrs=7", output)
+        self.assertIn(f"      policy hash: {policy_hash}", output)
+        self.assertNotIn("...", output)
         self.assertIn("APPROVED_PENDING_ENROLLMENT", output)
 
 
