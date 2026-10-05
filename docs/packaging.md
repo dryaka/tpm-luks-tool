@@ -192,6 +192,71 @@ administrator configuration; `apt purge` may remove it. Runtime
 `/var/lib/tpm-luks` state/history are not package-owned and are therefore not
 removed by either operation.
 
+## Containerized builds
+
+On Fedora, both package formats can be built without installing their native
+build toolchains on the host. The container wrappers require only a compatible
+container engine and use Podman by default.
+
+### RPM in Fedora container
+
+```bash
+./packaging/build-rpm-container.sh
+```
+
+Default image:
+
+```text
+fedora:latest
+```
+
+The wrapper installs the RPM build dependencies inside an ephemeral container
+and delegates to `packaging/build-rpm.sh`. Artifacts are written back to:
+
+```text
+dist/rpm/
+```
+
+### DEB in Debian container
+
+```bash
+./packaging/build-deb-container.sh
+```
+
+Default image:
+
+```text
+debian:12
+```
+
+The wrapper installs the Debian build dependencies inside an ephemeral
+container and delegates to `packaging/build-deb.sh`. Artifacts are written
+back to:
+
+```text
+dist/deb/
+```
+
+The repository is bind-mounted read/write at `/src`. With Podman, the wrapper
+adds the SELinux `:Z` relabel option required on enforcing Fedora hosts.
+
+Alternative compatible engines can be selected explicitly:
+
+```bash
+CONTAINER_ENGINE=docker ./packaging/build-rpm-container.sh
+CONTAINER_ENGINE=docker ./packaging/build-deb-container.sh
+```
+
+The images are also overrideable:
+
+```bash
+RPM_CONTAINER_IMAGE=fedora:44 ./packaging/build-rpm-container.sh
+DEB_CONTAINER_IMAGE=ubuntu:24.04 ./packaging/build-deb-container.sh
+```
+
+The native build scripts remain authoritative; the container scripts only
+provide isolated build environments around them.
+
 ## Versioning
 
 The upstream version in `pyproject.toml` must match:
