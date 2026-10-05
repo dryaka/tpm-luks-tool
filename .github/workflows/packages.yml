@@ -24,11 +24,14 @@ jobs:
           rpm -qpR dist/rpm/tpm-luks-tool-*.noarch.rpm
           rpm -qpR dist/rpm/tpm-luks-tool-*.noarch.rpm | grep -Eq '^python3 >= 3\.11$'
           ! rpm -qpl dist/rpm/tpm-luks-tool-*.noarch.rpm | grep -q '^/var/lib/tpm-luks'
+          rpm -qpl dist/rpm/tpm-luks-tool-*.noarch.rpm | grep -q '/usr/lib/tmpfiles.d/tpm-luks.conf'
       - name: Install and smoke test RPM
         run: |
           dnf -y install dist/rpm/tpm-luks-tool-*.noarch.rpm
           tpm-luks --help
           test -f /etc/tpm-luks.toml
+          test "$(stat -c '%a:%U:%G' /var/lib/tpm-luks)" = "700:root:root"
+          test "$(stat -c '%a:%U:%G' /var/lib/tpm-luks/history)" = "700:root:root"
       - uses: actions/upload-artifact@v4
         with:
           name: rpm-fedora
@@ -58,11 +61,14 @@ jobs:
           rpm -qpR dist/rpm/tpm-luks-tool-*.noarch.rpm
           rpm -qpR dist/rpm/tpm-luks-tool-*.noarch.rpm | grep -Eq '^python3\.11 >= 3\.11$'
           ! rpm -qpl dist/rpm/tpm-luks-tool-*.noarch.rpm | grep -q '^/var/lib/tpm-luks'
+          rpm -qpl dist/rpm/tpm-luks-tool-*.noarch.rpm | grep -q '/usr/lib/tmpfiles.d/tpm-luks.conf'
       - name: Install and smoke test RPM
         run: |
           dnf -y install dist/rpm/tpm-luks-tool-*.noarch.rpm
           tpm-luks --help
           test -f /etc/tpm-luks.toml
+          test "$(stat -c '%a:%U:%G' /var/lib/tpm-luks)" = "700:root:root"
+          test "$(stat -c '%a:%U:%G' /var/lib/tpm-luks/history)" = "700:root:root"
       - uses: actions/upload-artifact@v4
         with:
           name: rpm-rocky9
@@ -88,12 +94,15 @@ jobs:
           dpkg-deb --contents dist/deb/tpm-luks-tool_*_all.deb
           dpkg-deb --field dist/deb/tpm-luks-tool_*_all.deb Depends | grep -q 'python3 (>= 3.11)'
           ! dpkg-deb --contents dist/deb/tpm-luks-tool_*_all.deb | grep -q './var/lib/tpm-luks'
+          dpkg-deb --contents dist/deb/tpm-luks-tool_*_all.deb | grep -q './usr/lib/tmpfiles.d/tpm-luks.conf'
       - name: Install and smoke test DEB
         run: |
           apt-get update
           DEBIAN_FRONTEND=noninteractive apt-get install -y ./dist/deb/tpm-luks-tool_*_all.deb
           tpm-luks --help
           test -f /etc/tpm-luks.toml
+          test "$(stat -c '%a:%U:%G' /var/lib/tpm-luks)" = "700:root:root"
+          test "$(stat -c '%a:%U:%G' /var/lib/tpm-luks/history)" = "700:root:root"
       - uses: actions/upload-artifact@v4
         with:
           name: deb-debian12
@@ -118,12 +127,15 @@ jobs:
           dpkg-deb --contents dist/deb/tpm-luks-tool_*_all.deb
           dpkg-deb --field dist/deb/tpm-luks-tool_*_all.deb Depends | grep -q 'python3 (>= 3.11)'
           ! dpkg-deb --contents dist/deb/tpm-luks-tool_*_all.deb | grep -q './var/lib/tpm-luks'
+          dpkg-deb --contents dist/deb/tpm-luks-tool_*_all.deb | grep -q './usr/lib/tmpfiles.d/tpm-luks.conf'
       - name: Install and smoke test DEB
         run: |
           sudo apt-get update
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y ./dist/deb/tpm-luks-tool_*_all.deb
           tpm-luks --help
           test -f /etc/tpm-luks.toml
+          test "$(sudo stat -c '%a:%U:%G' /var/lib/tpm-luks)" = "700:root:root"
+          test "$(sudo stat -c '%a:%U:%G' /var/lib/tpm-luks/history)" = "700:root:root"
       - uses: actions/upload-artifact@v4
         with:
           name: deb-ubuntu2404

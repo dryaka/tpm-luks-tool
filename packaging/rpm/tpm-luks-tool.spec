@@ -4,7 +4,7 @@
 
 Name:           tpm-luks-tool
 Version:        0.4.0
-Release:        1%{?dist}
+Release:        2%{?dist}
 Summary:        Policy-driven TPM2-bound LUKS2 management tool
 
 License:        GPL-3.0-or-later
@@ -43,9 +43,13 @@ verification, and cleanup of obsolete TPM enrollments.
 %pyproject_save_files tpm_luks
 
 install -Dpm 0644 examples/tpm-luks.toml %{buildroot}%{_sysconfdir}/tpm-luks.toml
+install -Dpm 0644 packaging/tpm-luks.conf %{buildroot}%{_prefix}/lib/tmpfiles.d/tpm-luks.conf
 
 %check
 PYTHONPATH=src %{python3} -m unittest discover -s tests -v
+
+%post
+systemd-tmpfiles --create %{_prefix}/lib/tmpfiles.d/tpm-luks.conf >/dev/null 2>&1 || :
 
 %files -f %{pyproject_files}
 %license LICENSE
@@ -55,7 +59,12 @@ PYTHONPATH=src %{python3} -m unittest discover -s tests -v
 %doc docs/packaging.md
 %config(noreplace) %{_sysconfdir}/tpm-luks.toml
 %{_bindir}/tpm-luks
+%{_prefix}/lib/tmpfiles.d/tpm-luks.conf
 
 %changelog
+* Sun Oct 04 2026 Aleš Dryák <ales.dryak@volny.cz> - 0.4.0-2
+- Create protected default runtime state directories via systemd-tmpfiles.
+- Report unreadable state/history paths instead of treating them as absent.
+
 * Sun Oct 04 2026 Aleš Dryák <ales.dryak@volny.cz> - 0.4.0-1
 - Add initial native RPM packaging.

@@ -1,0 +1,12 @@
+#!/bin/sh
+set -e
+
+if command -v systemd-tmpfiles >/dev/null 2>&1; then
+    systemd-tmpfiles --create /usr/lib/tmpfiles.d/tpm-luks.conf
+else
+    install -d -m 0700 -o root -g root /var/lib/tpm-luks /var/lib/tpm-luks/history
+fi
+
+#DEBHELPER#
+
+exit 0

@@ -1,3 +1,10 @@
+tpm-luks-tool (0.4.0-2) unstable; urgency=medium
+
+  * Create protected default runtime state directories via systemd-tmpfiles.
+  * Report unreadable state/history paths instead of treating them as absent.
+
+ -- Aleš Dryák <ales.dryak@volny.cz>  Sun, 04 Oct 2026 22:15:00 +0200
+
 tpm-luks-tool (0.4.0-1) unstable; urgency=medium
 
   * Add initial native DEB packaging.
