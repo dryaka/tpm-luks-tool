@@ -28,31 +28,44 @@ select_container_engine() {
     exit 1
 }
 
-selinux_enforcing() {
-    if command -v getenforce >/dev/null 2>&1; then
-        [ "$(getenforce 2>/dev/null || true)" = "Enforcing" ]
-        return
+ensure_image() {
+    image=$1
+    if ! "$container_engine" image inspect "$image" >/dev/null 2>&1; then
+        "$container_engine" pull "$image"
     fi
+}
 
-    [ -r /sys/fs/selinux/enforce ] && [ "$(cat /sys/fs/selinux/enforce)" = "1" ]
+cleanup_container() {
+    if [ -n "${container_id:-}" ]; then
+        "$container_engine" rm -f "$container_id" >/dev/null 2>&1 || :
+    fi
 }
 
 container_engine=$(select_container_engine)
-mount_spec="$repo_root:/src"
-
-if selinux_enforcing; then
-    mount_spec="$mount_spec:Z"
-fi
+container_id=""
+trap cleanup_container 0
 
 container_image=${RPM_CONTAINER_IMAGE:-fedora:latest}
+ensure_image "$container_image"
 
-exec "$container_engine" run --rm \
-    -v "$mount_spec" \
-    -w /src \
-    "$container_image" \
-    sh -eu -c '
-        dnf -y install \
-            git gzip rpm rpm-build pyproject-rpm-macros \
-            python3-devel python3-pip python3-setuptools python3-wheel
-        ./packaging/build-rpm.sh
-    '
+container_id=$(
+    "$container_engine" create "$container_image" \
+        sh -c 'trap "exit 0" TERM INT; while :; do sleep 3600; done'
+)
+"$container_engine" start "$container_id" >/dev/null
+"$container_engine" exec "$container_id" mkdir -p /src
+"$container_engine" cp "$repo_root/." "$container_id:/src"
+
+"$container_engine" exec -w /src "$container_id" sh -eu -c '
+    dnf -y install \
+        git gzip rpm rpm-build pyproject-rpm-macros \
+        python3-devel python3-pip python3-setuptools python3-wheel
+    ./packaging/build-rpm.sh
+'
+
+rm -rf "$repo_root/dist/rpm"
+mkdir -p "$repo_root/dist/rpm"
+"$container_engine" cp "$container_id:/src/dist/rpm/." "$repo_root/dist/rpm"
+
+echo "Container-built RPM artifacts:"
+find "$repo_root/dist/rpm" -maxdepth 1 -type f -name '*.rpm' -print
