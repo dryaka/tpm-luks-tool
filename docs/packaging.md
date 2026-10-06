@@ -223,6 +223,68 @@ The package workflow builds and inspects packages on:
 The resulting RPM/DEB files are uploaded as workflow artifacts for inspection.
 Package builds run the same unit test suite as the source CI.
 
+## Tagged releases
+
+The `Release` workflow runs on pushed `v*` tags. It accepts stable tags in
+`vMAJOR.MINOR.PATCH` form only. For example, `v0.4.0` must match upstream
+`0.4.0` in `pyproject.toml` and both native package definitions. It does not
+rewrite package metadata: RPM release `2%{?dist}` and DEB revision `2` remain
+intact. A tag such as `v0.4.0-2` is not an upstream release tag.
+
+Release procedure:
+
+1. Merge the reviewed release automation and any intended release changes.
+2. Identify the exact `main` commit to release. Wait for its `CI` workflow to
+   succeed, including the `Compile` and `Unit tests` steps in the `test` job.
+   If needed, rerun the failed/cancelled job or run `CI` manually on `main`.
+   A successful pull-request run or a run with no executed test steps is
+   insufficient. Do not create or push the tag before this validation.
+3. After release approval, create and push the matching version tag on that
+   exact validated commit. This triggers publication automatically; there is
+   no separate approval prompt in the workflow.
+4. Review the resulting release and its linked build run.
+
+The workflow requires the tagged commit to be in `main` history and the newest
+`CI` run for that exact commit on `main` (push or manual) to have succeeded.
+It also checks the latest attempt's job and step results. It fails immediately
+if that evidence is absent; it does not wait for CI or accept a different
+commit's success.
+
+After validation, it calls the existing native package workflow from the same
+commit, rebuilding and smoke-testing Fedora, Rocky Linux 9, Debian 12, and
+Ubuntu 24.04 packages. The original pull-request and manual package triggers
+remain available. Release builds use the triggering commit explicitly and
+download only artifacts from their own run; earlier pull-request artifacts
+are never promoted to releases.
+
+Each release contains four binary packages and `SHA256SUMS`. Asset filenames
+are prefixed with `rpm-fedora`, `rpm-rocky9`, `deb-debian12`, or
+`deb-ubuntu2404` to prevent collisions, particularly between the identical
+Debian/Ubuntu package filenames. Only download the package for your target
+distribution. Prefixes do not change the package's internal identity or version.
+Source RPMs and Debian build metadata remain in the workflow artifacts.
+
+Download all four packages and `SHA256SUMS` into one directory, then verify:
+
+```bash
+sha256sum -c SHA256SUMS
+```
+
+Checksums detect changed downloads; they are not package signatures. Release
+notes record the full source commit and link to the build run. Only the publish
+job receives repository write permission. Before creating the release it
+checks that the remote tag still resolves to the triggering commit. All files
+are uploaded to a draft before publication. Existing releases are never
+overwritten. If upload or publication fails, inspect and remove only the
+incomplete draft before rerunning; never delete a published release or move a
+version tag to retry.
+
+For the first release, PR #14's successful package run on `bd7f548` is not
+validation of merged `main` commit `bf3def4`. The initially cancelled
+post-merge run `37363730399` is likewise insufficient until its test job
+actually succeeds. Merging this automation creates another commit, which
+must itself pass CI before it can be tagged.
+
 ## License and authorship
 
 The project is licensed under the GNU General Public License version 3 or later
@@ -240,6 +302,11 @@ the conventional Debian short form `GPL-3+` for the same version-3-or-later
 grant. The full license text is stored in the repository as `LICENSE`.
 
 ## Glossary
+
+**CI** — Continuous integration: automated compilation, tests, and package checks.
+
+**SHA-256** — Secure Hash Algorithm with a 256-bit digest, used for the
+download checksums in `SHA256SUMS`.
 
 **RPM** — RPM Package Manager package format used by Fedora, Rocky Linux, Red
 Hat Enterprise Linux, and related distributions.
