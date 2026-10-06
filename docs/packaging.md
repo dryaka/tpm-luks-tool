@@ -192,6 +192,82 @@ administrator configuration; `apt purge` may remove it. Runtime
 `/var/lib/tpm-luks` state/history are not package-owned and are therefore not
 removed by either operation.
 
+## Containerized builds
+
+Both package formats can be built on any Linux distribution with a compatible
+OCI container engine. The host does not need the RPM or Debian build toolchain.
+
+The wrappers select the container engine in this order:
+
+1. `CONTAINER_ENGINE`, when explicitly set;
+2. Podman, when available;
+3. Docker, when available.
+
+If SELinux is enforcing, the repository bind mount automatically receives the
+private `:Z` relabel option. This keeps the wrappers suitable for Fedora and
+other SELinux-enforcing hosts without making Fedora a host requirement.
+
+### RPM build container
+
+```bash
+./packaging/build-rpm-container.sh
+```
+
+Default build image:
+
+```text
+fedora:latest
+```
+
+The Fedora image is the RPM build environment only; the host distribution is
+irrelevant. The wrapper installs the RPM build dependencies inside an ephemeral
+container and delegates to `packaging/build-rpm.sh`.
+
+Artifacts are written back to:
+
+```text
+dist/rpm/
+```
+
+### DEB build container
+
+```bash
+./packaging/build-deb-container.sh
+```
+
+Default build image:
+
+```text
+debian:12
+```
+
+The Debian image is the DEB build environment only. The wrapper installs the
+Debian build dependencies inside an ephemeral container and delegates to
+`packaging/build-deb.sh`.
+
+Artifacts are written back to:
+
+```text
+dist/deb/
+```
+
+Alternative engines can be selected explicitly:
+
+```bash
+CONTAINER_ENGINE=docker ./packaging/build-rpm-container.sh
+CONTAINER_ENGINE=docker ./packaging/build-deb-container.sh
+```
+
+Build images can also be overridden independently of the host distribution:
+
+```bash
+RPM_CONTAINER_IMAGE=fedora:44 ./packaging/build-rpm-container.sh
+DEB_CONTAINER_IMAGE=ubuntu:24.04 ./packaging/build-deb-container.sh
+```
+
+The native build scripts remain authoritative. The container wrappers only
+supply isolated, reproducible build environments around them.
+
 ## Versioning
 
 The upstream version in `pyproject.toml` must match:

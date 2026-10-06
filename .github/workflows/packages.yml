@@ -160,3 +160,22 @@ jobs:
           name: deb-ubuntu2404
           if-no-files-found: error
           path: dist/deb/*
+
+
+  container-builders:
+    name: Container builders
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build RPM through container wrapper
+        env:
+          CONTAINER_ENGINE: docker
+        run: |
+          ./packaging/build-rpm-container.sh
+          test -n "$(find dist/rpm -maxdepth 1 -type f -name '*.rpm' -print -quit)"
+      - name: Build DEB through container wrapper
+        env:
+          CONTAINER_ENGINE: docker
+        run: |
+          ./packaging/build-deb-container.sh
+          test -n "$(find dist/deb -maxdepth 1 -type f -name '*.deb' -print -quit)"
