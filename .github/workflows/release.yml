@@ -97,8 +97,7 @@ jobs:
         run: |
           set -euo pipefail
           # Refuse a moved tag, including annotated tags resolving elsewhere.
-          git fetch --no-tags origin "refs/tags/$RELEASE_TAG"
-          test "$(git rev-parse 'FETCH_HEAD^{commit}')" = "$RELEASE_SHA"
+          test "$(gh api "repos/$GH_REPO/commits/refs/tags/$RELEASE_TAG" --jq .sha)" = "$RELEASE_SHA"
           printf 'Built from commit `%s`.\n\nBuild: %s/%s/actions/runs/%s\n\nVerify downloaded packages with `sha256sum -c SHA256SUMS`.\n' \
             "$RELEASE_SHA" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" > release-notes.md
           # Existing releases are never overwritten. Failed uploads stay draft.
