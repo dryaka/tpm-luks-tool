@@ -340,26 +340,71 @@ Debian/Ubuntu package filenames. Only download the package for your target
 distribution. Prefixes do not change the package's internal identity or version.
 Source RPMs and Debian build metadata remain in the workflow artifacts.
 
-Download all four packages and `SHA256SUMS` into one directory, then verify:
-
-```bash
-sha256sum -c SHA256SUMS
-```
-
-Checksums detect changed downloads; they are not package signatures. Release
-notes record the full source commit and link to the build run. Only the publish
-job receives repository write permission. Before creating the release it
+Release notes record the full source commit and link to the build run. Only the
+publish job receives repository write permission. Before creating the release it
 checks that the remote tag still resolves to the triggering commit. All files
 are uploaded to a draft before publication. Existing releases are never
 overwritten. If upload or publication fails, inspect and remove only the
 incomplete draft before rerunning; never delete a published release or move a
 version tag to retry.
 
-For the first release, PR #14's successful package run on `bd7f548` is not
-validation of merged `main` commit `bf3def4`. The initially cancelled
-post-merge run `37363730399` is likewise insufficient until its test job
-actually succeeds. Merging this automation creates another commit, which
-must itself pass CI before it can be tagged.
+### Validate release downloads
+
+Download the package for your distribution, `SHA256SUMS`, and
+`SHA256SUMS.asc` from the same release into one directory. Preserve the asset
+filenames. If the signature is absent, the following authenticity check cannot
+be completed.
+
+#### Obtain and authenticate the public key
+
+Download [signing-keys.asc](../keys/signing-keys.asc) from the repository.
+It contains the release-signing public key and the public keys that certify
+its identity. The authorized release-signing primary fingerprint is:
+
+```text
+A2EE 15E1 3325 902D 5906 4AB8 7955 EAD7 8B5A F90A
+```
+
+With GnuPG installed, inspect the bundle:
+
+```bash
+gpg --show-keys --with-subkey-fingerprint signing-keys.asc
+```
+
+Confirm the full primary fingerprint through an independently trusted channel,
+or validate its certifications using a certifying key you already trust.
+Bundled certifier keys do not establish trust by themselves. Then import:
+
+```bash
+gpg --import signing-keys.asc
+```
+
+#### Authenticate the manifest and check the package
+
+First verify the detached signature on the checksum manifest:
+
+```bash
+gpg --verify SHA256SUMS.asc SHA256SUMS
+```
+
+Require a successful exit and a `Good signature` from the primary key above
+or one of its valid signing subkeys. Stop if verification fails or the signer
+is unexpected. An uncertified-key warning can remain after manual fingerprint
+confirmation; importing a key alone does not make it trusted.
+
+Only after successful signature verification, check the downloaded package:
+
+```bash
+sha256sum --ignore-missing -c SHA256SUMS
+```
+
+Require the exact package you intend to install to report `OK`. Missing
+packages are skipped. If you downloaded every package in the manifest, use
+`sha256sum -c SHA256SUMS` to check them all.
+
+The OpenPGP signature authenticates the checksum manifest; the SHA-256 checks
+verify that the packages match it. This does not provide native RPM or DEB
+package signatures or configure package-manager trust.
 
 ## License and authorship
 
@@ -380,6 +425,11 @@ grant. The full license text is stored in the repository as `LICENSE`.
 ## Glossary
 
 **CI** — Continuous integration: automated compilation, tests, and package checks.
+
+**GnuPG (GPG)** — GNU Privacy Guard, the tool used to verify OpenPGP signatures.
+
+**OpenPGP** — Open Pretty Good Privacy, the public-key signature and encryption
+standard used for release authentication.
 
 **SHA-256** — Secure Hash Algorithm with a 256-bit digest, used for the
 download checksums in `SHA256SUMS`.
