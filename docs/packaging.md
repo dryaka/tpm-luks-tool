@@ -340,15 +340,92 @@ Debian/Ubuntu package filenames. Only download the package for your target
 distribution. Prefixes do not change the package's internal identity or version.
 Source RPMs and Debian build metadata remain in the workflow artifacts.
 
-Download all four packages and `SHA256SUMS` into one directory, then verify:
+### Authenticate and verify downloads
+
+The [v0.4.0 release](https://github.com/dryaka/tpm-luks-tool/releases/tag/v0.4.0),
+published on October 13, 2026, also has `SHA256SUMS.asc`, uploaded manually by
+`dryaka` on October 14. This is an ASCII-armored detached OpenPGP signature of
+`SHA256SUMS`; it contains neither the manifest nor a public key. The following
+procedure also applies to later releases that provide the same signature format.
+The current release workflow generates and publishes `SHA256SUMS` but does not
+automatically generate or upload GPG signatures. Check each release's assets;
+do not assume that every release has a signature.
+
+#### Obtain and authenticate the public key
+
+Public keys associated with the maintainer's GitHub account can be downloaded
+from [github.com/dryaka.gpg](https://github.com/dryaka.gpg). Inspection on
+October 15, 2026 found a key there that successfully verifies the v0.4.0
+manifest signature, with these fingerprints:
+
+| Key | Full fingerprint |
+| --- | --- |
+| Primary key | `A2EE 15E1 3325 902D 5906 4AB8 7955 EAD7 8B5A F90A` |
+| v0.4.0 signing subkey | `2B54 E1F3 A3CA 0D09 AE83 6B52 B77A FFD9 EB8D E00F` |
+
+These are observed fingerprints, not an independently authenticated declaration
+of the project's release-signing key. No separate authoritative release-key
+fingerprint announcement or project key-distribution location was established
+from the repository documentation or release metadata. Before trusting the key,
+confirm its full primary fingerprint and its authorization for release signing
+with the maintainer through an independently authenticated channel, such as an
+already verified contact. A key downloaded from GitHub, a keyserver search,
+a matching name/email, or the issuer fingerprint in the signature alone does
+not establish that trust. If you cannot confirm it, stop: you cannot claim to
+have authenticated the download's origin.
+
+Download the key and inspect the primary and subkey fingerprints before import:
+
+```bash
+curl -fsSL https://github.com/dryaka.gpg -o maintainer-public-keys.asc
+gpg --show-keys --with-subkey-fingerprint maintainer-public-keys.asc
+# Continue only after independent fingerprint and release-signing confirmation.
+gpg --import maintainer-public-keys.asc
+```
+
+The endpoint may change or contain multiple keys. Importing a key does not make
+it trusted. For later releases, confirm any replacement key or signing subkey
+rather than accepting it solely because it is served by the same endpoint.
+
+#### Verify the manifest, then the packages
+
+Download `SHA256SUMS.asc`, `SHA256SUMS`, and the packages from the same release
+into one directory, preserving their asset filenames. With GnuPG installed and
+the authenticated public key imported, first run:
+
+```bash
+gpg --verify SHA256SUMS.asc SHA256SUMS
+```
+
+Require a successful exit and a good signature from the expected key, including
+its authorized signing subkey. A `Good signature` message establishes that the
+manifest matches the signature made by that key; the independent fingerprint
+check establishes whose key you trust. GnuPG may still warn that the key is not
+certified with a trusted signature if you have not recorded that trust locally.
+Do not suppress the warning by assigning arbitrary ownertrust. If the key is
+missing, unexpected, revoked, or expired, or verification fails, stop and
+resolve the problem before installing any package.
+
+Only after authenticating the manifest, check the package hashes:
 
 ```bash
 sha256sum -c SHA256SUMS
 ```
 
-Checksums detect changed downloads; they are not package signatures. Release
-notes record the full source commit and link to the build run. Only the publish
-job receives repository write permission. Before creating the release it
+The manifest lists all four packages. Download all four for the command above
+to complete without missing-file errors, and require every entry to report
+`OK`. If you downloaded only your target distribution's package, use
+`sha256sum --ignore-missing -c SHA256SUMS` instead and require that exact package
+to report `OK`; skipped entries have not been checked.
+
+The GPG signature authenticates the checksum manifest, and the SHA-256 checks
+establish that the downloaded packages match that manifest. This is separate
+from native RPM package signatures or DEB/APT signing mechanisms: it does not
+embed signatures in the packages or configure package-manager trust. A checksum
+check alone detects changed downloads but does not authenticate their origin.
+
+Release notes record the full source commit and link to the build run. Only the
+publish job receives repository write permission. Before creating the release it
 checks that the remote tag still resolves to the triggering commit. All files
 are uploaded to a draft before publication. Existing releases are never
 overwritten. If upload or publication fails, inspect and remove only the
